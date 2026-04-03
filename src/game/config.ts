@@ -86,8 +86,8 @@ export const GAME_CONFIG = {
   // Параметры появления и действия бомб.
   bombs: {
     startLevel: 10,
-    chancePerLevel: 0.02, // было 0.03
-    maxChance: 0.1, // было 0.14
+    chancePerLevel: 0.02,
+    maxChance: 0.1,
     blastRadiusFactor: 2.2,
     minBlastRadius: 92
   },
