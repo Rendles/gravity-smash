@@ -49,6 +49,7 @@ import type {
   GameMode,
   GameControllerOptions,
   GamePieceBody,
+  GameProgressSnapshot,
   GameUiState,
   LevelSettings,
   LevelGoalType,
@@ -106,6 +107,7 @@ export class GravitySmashGame {
   private readonly bottomBar: HTMLElement;
   private readonly onUiChange: (state: GameUiState) => void;
   private readonly onAudioEvent?: (event: GameAudioEvent) => void;
+  private readonly onProgressChange?: (progress: GameProgressSnapshot) => void;
   private readonly mode: GameMode;
 
   private engine: Engine | null = null;
@@ -152,6 +154,8 @@ export class GravitySmashGame {
   private suppressTurnBasedMoveConsumption = false;
   private uiState = createInitialUiState();
   private readonly economy = new PlayerEconomy();
+  private highestUnlockedLevel = INITIAL_LEVEL;
+  private lastRoundOutcome: 'win' | 'lose' | null = null;
 
   private readonly resizeHandler = () => {
     this.resizeGame();
@@ -214,12 +218,20 @@ export class GravitySmashGame {
     this.bottomBar = options.bottomBar;
     this.onUiChange = options.onUiChange;
     this.onAudioEvent = options.onAudioEvent;
+    this.onProgressChange = options.onProgressChange;
     this.mode = options.mode ?? 'arcade';
+    this.highestUnlockedLevel = Math.max(
+      INITIAL_LEVEL,
+      options.initialProgress?.resumeLevel ?? INITIAL_LEVEL,
+      options.initialProgress?.highestUnlockedLevel ?? INITIAL_LEVEL
+    );
+    this.economy.hydrate(options.initialProgress?.economy ?? null);
     window.addEventListener('resize', this.resizeHandler);
   }
 
   startLevel(level: number) {
     this.currentLevel = Math.max(1, level);
+    this.highestUnlockedLevel = Math.max(this.highestUnlockedLevel, this.currentLevel);
     this.levelGoal = getLevelSettings(this.currentLevel, this.mode).goal;
     this.levelGoalType = getLevelSettings(this.currentLevel, this.mode).goalType;
     this.levelDestroyed = 0;
@@ -240,6 +252,7 @@ export class GravitySmashGame {
     this.blastWaves = [];
     this.currentDifficulty = null;
     this.selectedPiece = null;
+    this.lastRoundOutcome = null;
 
     this.setUiState({
       overlayVisible: false,
@@ -301,6 +314,8 @@ export class GravitySmashGame {
     } else {
       this.scheduleSpawnAfterDelay(GAME_CONFIG.spawn.initialDelayMs);
     }
+
+    this.emitProgressChange();
   }
 
   restartCurrentLevel() {
@@ -401,6 +416,7 @@ export class GravitySmashGame {
 
     this.startSpectrumEffect(GAME_CONFIG.abilities.spectrumDurationMs);
     this.onAudioEvent?.({ type: 'ability', ability: 'spectrum' });
+    this.emitProgressChange();
     this.updateHud();
     return true;
   }
@@ -428,6 +444,20 @@ export class GravitySmashGame {
     return this.economy.getSnapshot();
   }
 
+  getProgressSnapshot(): GameProgressSnapshot {
+    const resumeLevel =
+      this.lastRoundOutcome === 'win'
+        ? Math.max(this.currentLevel + 1, this.highestUnlockedLevel)
+        : this.currentLevel;
+    const normalizedResumeLevel = Math.max(INITIAL_LEVEL, resumeLevel);
+
+    return {
+      resumeLevel: normalizedResumeLevel,
+      highestUnlockedLevel: Math.max(this.highestUnlockedLevel, normalizedResumeLevel),
+      economy: this.economy.getSnapshot()
+    };
+  }
+
   getUpgradeCatalog() {
     return UPGRADE_DEFINITIONS;
   }
@@ -435,10 +465,15 @@ export class GravitySmashGame {
   purchaseUpgrade(upgradeId: UpgradeId) {
     const purchased = this.economy.purchaseUpgrade(upgradeId);
     if (purchased) {
+      this.emitProgressChange();
       this.updateHud();
     }
 
     return purchased;
+  }
+
+  private emitProgressChange() {
+    this.onProgressChange?.(this.getProgressSnapshot());
   }
 
   private isTurnBasedMode() {
@@ -1685,6 +1720,7 @@ export class GravitySmashGame {
     this.levelNormalDestroyed += normalDestroyed;
     this.levelSpecialDestroyed += specialDestroyed;
     this.onAudioEvent?.({ type: 'destroy', count: uniqueBodies.length });
+    this.emitProgressChange();
     this.updateHud();
 
     if (this.isGoalReached()) {
@@ -1799,12 +1835,18 @@ export class GravitySmashGame {
     this.clearFreezeTimer();
     this.clearFireTimer();
     this.clearSpectrumTimer();
+    this.lastRoundOutcome = mode;
+
+    if (mode === 'win') {
+      this.highestUnlockedLevel = Math.max(this.highestUnlockedLevel, this.currentLevel + 1);
+    }
 
     if (this.runner) {
       Runner.stop(this.runner);
     }
 
     this.onAudioEvent?.({ type: 'round', result: mode });
+    this.emitProgressChange();
     this.showOverlay(mode);
     this.updateHud();
   }

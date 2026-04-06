@@ -136,7 +136,7 @@ export default function App() {
       game.destroy();
       gameRef.current = null;
     };
-  }, [hasStarted, selectedMode]);
+  }, [hasStarted, progressReady, selectedMode]);
 
   const appClassName = [
     uiState.freezeButtonActive ? 'freeze-active' : '',
@@ -329,6 +329,8 @@ export default function App() {
             <button
               type="button"
               className="menu-mode-card"
+              disabled={!progressReady}
+              aria-disabled={!progressReady}
               onClick={() => {
                 void audioRef.current?.resume();
                 setSelectedMode('turn-based');
