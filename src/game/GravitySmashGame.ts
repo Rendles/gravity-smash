@@ -31,6 +31,7 @@ import {
   getLevelDangerText,
   getLoseOverlayState,
   getPausedOverlayState,
+  getProgressLabelText,
   getProgressCountText,
   getProgressSubText,
   getResumeCountdownOverlayState,
@@ -45,11 +46,13 @@ import type {
   Arena,
   BlastWave,
   EconomySnapshot,
+  GameMode,
   GameControllerOptions,
   GamePieceBody,
   GameProgressSnapshot,
   GameUiState,
   LevelSettings,
+  LevelGoalType,
   Particle,
   UpgradeId,
   WallBodies
@@ -70,6 +73,7 @@ type CollisionEventLike = {
 
 function areUiStatesEqual(a: GameUiState, b: GameUiState) {
   return (
+    a.progressLabelText === b.progressLabelText &&
     a.progressCountText === b.progressCountText &&
     a.progressSubText === b.progressSubText &&
     a.levelCountText === b.levelCountText &&
@@ -104,6 +108,7 @@ export class GravitySmashGame {
   private readonly onUiChange: (state: GameUiState) => void;
   private readonly onAudioEvent?: (event: GameAudioEvent) => void;
   private readonly onProgressChange?: (progress: GameProgressSnapshot) => void;
+  private readonly mode: GameMode;
 
   private engine: Engine | null = null;
   private render: Render | null = null;
@@ -125,6 +130,7 @@ export class GravitySmashGame {
   private freezeSpawnRemainingMs: number | null = null;
   private freezeTimer: number | null = null;
   private freezeEndsAt: number | null = null;
+  private freezeTurnsRemaining = 0;
   private fireTimer: number | null = null;
   private fireEndsAt: number | null = null;
   private spectrumTimer: number | null = null;
@@ -135,13 +141,21 @@ export class GravitySmashGame {
   private isPaused = false;
   private isResumeCountdownActive = false;
   private currentLevel = INITIAL_LEVEL;
-  private highestUnlockedLevel = INITIAL_LEVEL;
+  private levelGoalType: LevelGoalType = 'all';
   private levelGoal = 0;
   private levelDestroyed = 0;
+  private levelNormalDestroyed = 0;
+  private levelSpecialDestroyed = 0;
   private currentDifficulty: LevelSettings | null = null;
   private selectedPiece: GamePieceBody | null = null;
+  private turnBasedOverflowCheckAt: number | null = null;
+  private turnBasedOverflowCheckConsumesTurn = false;
+  private turnBasedOverflowWarningActive = false;
+  private suppressTurnBasedMoveConsumption = false;
   private uiState = createInitialUiState();
   private readonly economy = new PlayerEconomy();
+  private highestUnlockedLevel = INITIAL_LEVEL;
+  private lastRoundOutcome: 'win' | 'lose' | null = null;
 
   private readonly resizeHandler = () => {
     this.resizeGame();
@@ -163,7 +177,21 @@ export class GravitySmashGame {
       updateBodyDeformation(body, delta, GAME_CONFIG.physics.plasticDeformRecovery)
     );
     this.applyDifficultyState();
-    this.checkOverflow(performance.now());
+
+    if (this.isTurnBasedMode()) {
+      if (!this.getPieces().length) {
+        this.resolveTurnBasedStep({ consumeTurn: false });
+        return;
+      }
+
+      const now = performance.now();
+      if (this.turnBasedOverflowCheckAt !== null && now >= this.turnBasedOverflowCheckAt) {
+        this.turnBasedOverflowCheckAt = null;
+        this.checkTurnBasedOverflow();
+      }
+    } else {
+      this.checkOverflow(performance.now());
+    }
   };
 
   private readonly collisionStartHandler = (event: CollisionEventLike) => {
@@ -191,35 +219,40 @@ export class GravitySmashGame {
     this.onUiChange = options.onUiChange;
     this.onAudioEvent = options.onAudioEvent;
     this.onProgressChange = options.onProgressChange;
-
-    if (options.initialProgress) {
-      this.highestUnlockedLevel = Math.max(
-        INITIAL_LEVEL,
-        Math.floor(options.initialProgress.highestUnlockedLevel)
-      );
-      this.economy.hydrate(options.initialProgress.economy);
-    }
-
+    this.mode = options.mode ?? 'arcade';
+    this.highestUnlockedLevel = Math.max(
+      INITIAL_LEVEL,
+      options.initialProgress?.resumeLevel ?? INITIAL_LEVEL,
+      options.initialProgress?.highestUnlockedLevel ?? INITIAL_LEVEL
+    );
+    this.economy.hydrate(options.initialProgress?.economy ?? null);
     window.addEventListener('resize', this.resizeHandler);
   }
 
   startLevel(level: number) {
-    this.currentLevel = Math.max(INITIAL_LEVEL, level);
+    this.currentLevel = Math.max(1, level);
     this.highestUnlockedLevel = Math.max(this.highestUnlockedLevel, this.currentLevel);
-    this.levelGoal = getLevelSettings(this.currentLevel).goal;
+    this.levelGoal = getLevelSettings(this.currentLevel, this.mode).goal;
+    this.levelGoalType = getLevelSettings(this.currentLevel, this.mode).goalType;
     this.levelDestroyed = 0;
+    this.levelNormalDestroyed = 0;
+    this.levelSpecialDestroyed = 0;
     this.roundEnded = false;
     this.isPaused = false;
     this.isResumeCountdownActive = false;
     this.pausedSpawnRemainingMs = null;
     this.freezeSpawnRemainingMs = null;
     this.freezeEndsAt = null;
+    this.freezeTurnsRemaining = 0;
     this.fireEndsAt = null;
     this.spectrumEndsAt = null;
+    this.turnBasedOverflowCheckAt = null;
+    this.suppressTurnBasedMoveConsumption = false;
     this.particles = [];
     this.blastWaves = [];
     this.currentDifficulty = null;
     this.selectedPiece = null;
+    this.lastRoundOutcome = null;
 
     this.setUiState({
       overlayVisible: false,
@@ -273,7 +306,15 @@ export class GravitySmashGame {
 
     this.applyDifficultyState();
     this.updateHud();
-    this.scheduleSpawnAfterDelay(GAME_CONFIG.spawn.initialDelayMs);
+
+    if (this.isTurnBasedMode()) {
+      this.populateTurnBasedStart();
+      this.ensureTurnBasedPlayableBoard();
+      this.scheduleTurnBasedOverflowCheck(false);
+    } else {
+      this.scheduleSpawnAfterDelay(GAME_CONFIG.spawn.initialDelayMs);
+    }
+
     this.emitProgressChange();
   }
 
@@ -293,7 +334,7 @@ export class GravitySmashGame {
       Runner.stop(this.runner);
     }
 
-    this.setUiState(getPausedOverlayState());
+    this.setUiState(getPausedOverlayState(this.mode));
   }
 
   useFreezePower() {
@@ -318,12 +359,24 @@ export class GravitySmashGame {
       return false;
     }
 
+    const burnableBodies = this.getBottomBodies();
+    if (!burnableBodies.length) {
+      this.updateHud();
+      return false;
+    }
+
     if (!this.economy.spendPoints(GAME_CONFIG.abilities.fireCost)) {
       this.updateHud();
       return false;
     }
 
-    this.burnBottomPieces();
+    this.suppressTurnBasedMoveConsumption = this.isTurnBasedMode();
+    try {
+      this.burnBottomPieces(burnableBodies);
+    } finally {
+      this.suppressTurnBasedMoveConsumption = false;
+    }
+
     this.startFireEffect(GAME_CONFIG.abilities.fireDurationMs);
     this.onAudioEvent?.({ type: 'ability', ability: 'fire' });
     this.emitProgressChange();
@@ -347,7 +400,15 @@ export class GravitySmashGame {
       return false;
     }
 
-    const destroyed = this.destroyRandomColorGroup(targetColorName);
+    this.suppressTurnBasedMoveConsumption = this.isTurnBasedMode();
+    let destroyed = false;
+
+    try {
+      destroyed = this.destroyRandomColorGroup(targetColorName);
+    } finally {
+      this.suppressTurnBasedMoveConsumption = false;
+    }
+
     if (!destroyed) {
       this.updateHud();
       return false;
@@ -384,9 +445,15 @@ export class GravitySmashGame {
   }
 
   getProgressSnapshot(): GameProgressSnapshot {
+    const resumeLevel =
+      this.lastRoundOutcome === 'win'
+        ? Math.max(this.currentLevel + 1, this.highestUnlockedLevel)
+        : this.currentLevel;
+    const normalizedResumeLevel = Math.max(INITIAL_LEVEL, resumeLevel);
+
     return {
-      resumeLevel: this.getResumeLevel(),
-      highestUnlockedLevel: this.highestUnlockedLevel,
+      resumeLevel: normalizedResumeLevel,
+      highestUnlockedLevel: Math.max(this.highestUnlockedLevel, normalizedResumeLevel),
       economy: this.economy.getSnapshot()
     };
   }
@@ -405,23 +472,47 @@ export class GravitySmashGame {
     return purchased;
   }
 
-  private getResumeLevel() {
-    if (this.roundEnded && this.uiState.overlayCardWin) {
-      return Math.min(this.highestUnlockedLevel, this.currentLevel + 1);
-    }
-
-    return this.currentLevel;
+  private emitProgressChange() {
+    this.onProgressChange?.(this.getProgressSnapshot());
   }
 
-  private emitProgressChange() {
-    this.onProgressChange?.({
-      resumeLevel: this.getResumeLevel(),
-      highestUnlockedLevel: this.highestUnlockedLevel,
-      economy: this.economy.getSnapshot()
-    });
+  private isTurnBasedMode() {
+    return this.mode === 'turn-based';
+  }
+
+  private isSpecialGoalPiece(body: GamePieceBody) {
+    return (
+      !!body.isBomb ||
+      !!body.isColorDestroyer ||
+      (body.markerType ?? 'none') !== 'none'
+    );
+  }
+
+  private isNormalGoalPiece(body: GamePieceBody) {
+    return !body.isBomb && !body.isColorDestroyer;
+  }
+
+  private getDisplayedDestroyedCount() {
+    switch (this.levelGoalType) {
+      case 'normal':
+        return this.levelNormalDestroyed;
+      case 'special':
+        return this.levelSpecialDestroyed;
+      case 'all':
+      default:
+        return this.levelDestroyed;
+    }
+  }
+
+  private isGoalReached() {
+    return this.getDisplayedDestroyedCount() >= this.levelGoal;
   }
 
   private isFreezeActive() {
+    if (this.isTurnBasedMode()) {
+      return this.freezeTurnsRemaining > 0;
+    }
+
     return this.freezeEndsAt !== null && this.freezeEndsAt > performance.now();
   }
 
@@ -443,6 +534,12 @@ export class GravitySmashGame {
   }
 
   private startFreezeEffect(durationMs: number) {
+    if (this.isTurnBasedMode()) {
+      this.freezeTurnsRemaining += GAME_CONFIG.abilities.freezeTurnDuration;
+      this.updateHud();
+      return;
+    }
+
     const remainingFreezeMs = this.freezeEndsAt
       ? Math.max(0, this.freezeEndsAt - performance.now())
       : 0;
@@ -461,6 +558,12 @@ export class GravitySmashGame {
   }
 
   private finishFreezeEffect() {
+    if (this.isTurnBasedMode()) {
+      this.freezeTurnsRemaining = 0;
+      this.updateHud();
+      return;
+    }
+
     if (this.roundEnded) {
       return;
     }
@@ -665,8 +768,15 @@ export class GravitySmashGame {
     const hasSpectrumTarget = this.getRandomSpectrumTargetColor() !== null;
 
     this.setUiState({
-      progressCountText: getProgressCountText(this.levelDestroyed, this.levelGoal),
-      progressSubText: getProgressSubText(this.levelDestroyed, this.levelGoal),
+      progressLabelText: getProgressLabelText(this.mode, this.levelGoalType),
+      progressCountText: getProgressCountText(
+        this.getDisplayedDestroyedCount(),
+        this.levelGoal
+      ),
+      progressSubText: getProgressSubText(
+        this.getDisplayedDestroyedCount(),
+        this.levelGoal
+      ),
       levelCountText: getLevelCountText(this.currentLevel),
       levelDangerText: this.currentDifficulty
         ? getLevelDangerText(this.currentDifficulty)
@@ -707,19 +817,30 @@ export class GravitySmashGame {
       return;
     }
 
-    this.currentDifficulty = getLevelSettings(this.currentLevel);
+    this.currentDifficulty = getLevelSettings(this.currentLevel, this.mode);
     this.engine.gravity.y = this.currentDifficulty.gravityY;
     this.engine.timing.timeScale = this.currentDifficulty.timeScale;
     this.updateHud();
   }
 
-  private createPiece() {
-    const difficulty = this.currentDifficulty ?? getLevelSettings(this.currentLevel);
+  private createPiece(position?: { x?: number; y?: number }) {
+    const difficulty =
+      this.currentDifficulty ?? getLevelSettings(this.currentLevel, this.mode);
+    const hasActiveSpecialPiece = this.getPieces().some(
+      piece =>
+        !piece.pendingDestroy && (piece.isBomb || piece.isColorDestroyer)
+    );
+    const specialSpawnPenalty = hasActiveSpecialPiece
+      ? GAME_CONFIG.specials.activeSpecialSpawnPenaltyMultiplier
+      : 1;
+    const adjustedColorDestroyerChance =
+      difficulty.colorDestroyerChance * specialSpawnPenalty;
+    const adjustedBombChance = difficulty.bombChance * specialSpawnPenalty;
     const specialRoll = Math.random();
-    const isColorDestroyer = specialRoll < difficulty.colorDestroyerChance;
+    const isColorDestroyer = specialRoll < adjustedColorDestroyerChance;
     const isBomb =
       !isColorDestroyer &&
-      specialRoll < difficulty.colorDestroyerChance + difficulty.bombChance;
+      specialRoll < adjustedColorDestroyerChance + adjustedBombChance;
     const shape = isColorDestroyer
       ? 'color-destroyer'
       : isBomb
@@ -753,11 +874,13 @@ export class GravitySmashGame {
     const baseSize = rootSize * sizeMultiplier;
 
     const horizontalMargin = Math.max(26, baseSize * 0.95);
-    const x = rand(
-      this.arena.x + horizontalMargin,
-      this.arena.x + this.arena.width - horizontalMargin
-    );
-    const y = this.arena.spawnY;
+    const x =
+      position?.x ??
+      rand(
+        this.arena.x + horizontalMargin,
+        this.arena.x + this.arena.width - horizontalMargin
+      );
+    const y = position?.y ?? this.arena.spawnY;
 
     const options = {
       restitution: GAME_CONFIG.physics.restitution,
@@ -830,10 +953,186 @@ export class GravitySmashGame {
     piece.deformAngle = 0;
 
     Composite.add(this.getWorld(), piece);
+    return piece;
+  }
+
+  private populateTurnBasedStart() {
+    if (!this.currentDifficulty) {
+      return;
+    }
+
+    const columnFractions = [0.22, 0.4, 0.6, 0.78];
+    const baseY = this.arena.y + this.arena.height - 78;
+
+    for (let index = 0; index < this.currentDifficulty.initialPieces; index += 1) {
+      const columnIndex = index % columnFractions.length;
+      const rowIndex = Math.floor(index / columnFractions.length);
+      const x =
+        this.arena.x +
+        this.arena.width * columnFractions[columnIndex] +
+        rand(-12, 12);
+      const y = baseY - rowIndex * 68 + rand(-10, 10);
+      const piece = this.createPiece({ x, y });
+      Body.setVelocity(piece, { x: rand(-0.12, 0.12), y: 0 });
+      Body.setAngularVelocity(piece, rand(-0.02, 0.02));
+    }
+  }
+
+  private getTurnBasedSpawnCount() {
+    if (!this.currentDifficulty) {
+      return 0;
+    }
+
+    const min = this.currentDifficulty.turnSpawnMin;
+    const max = this.currentDifficulty.turnSpawnMax;
+    return Math.max(min, Math.round(rand(min, max + 0.999)));
+  }
+
+  private spawnTurnBasedPieces(count: number) {
+    for (let index = 0; index < count; index += 1) {
+      this.createPiece();
+    }
+  }
+
+  private scheduleTurnBasedOverflowCheck(consumesTurn: boolean) {
+    this.turnBasedOverflowCheckAt =
+      performance.now() + GAME_CONFIG.turnBased.overflowSettleMs;
+    this.turnBasedOverflowCheckConsumesTurn = consumesTurn;
+  }
+
+  private resolveTurnBasedStep(options?: { consumeTurn?: boolean }) {
+    if (!this.isTurnBasedMode() || this.roundEnded) {
+      return;
+    }
+
+    const consumesTurn = options?.consumeTurn !== false;
+    const freezeConsumesThisTurn = consumesTurn && this.freezeTurnsRemaining > 0;
+    let spawnCount =
+      consumesTurn && !freezeConsumesThisTurn ? this.getTurnBasedSpawnCount() : 0;
+
+    if (!this.getPieces().length) {
+      spawnCount += GAME_CONFIG.turnBased.emptyBoardRefillCount;
+    }
+
+    if (spawnCount > 0) {
+      this.spawnTurnBasedPieces(spawnCount);
+    }
+
+    if (freezeConsumesThisTurn) {
+      this.freezeTurnsRemaining = Math.max(0, this.freezeTurnsRemaining - 1);
+    }
+
+    this.ensureTurnBasedPlayableBoard();
+    this.scheduleTurnBasedOverflowCheck(consumesTurn);
+    this.updateHud();
+  }
+
+  private canPiecesResolveAsMove(a: GamePieceBody, b: GamePieceBody) {
+    if (a === b || a.pendingDestroy || b.pendingDestroy) {
+      return false;
+    }
+
+    if (a.isColorDestroyer || b.isColorDestroyer) {
+      return true;
+    }
+
+    if (a.isBomb || b.isBomb) {
+      return true;
+    }
+
+    const firstMarker = a.markerType ?? 'none';
+    const secondMarker = b.markerType ?? 'none';
+
+    if (firstMarker !== 'none' || secondMarker !== 'none') {
+      return firstMarker !== 'none' && firstMarker === secondMarker;
+    }
+
+    return !!a.colorName && a.colorName === b.colorName;
+  }
+
+  private hasAvailableMoves() {
+    const pieces = this.getPieces().filter(piece => !piece.pendingDestroy);
+
+    for (let firstIndex = 0; firstIndex < pieces.length; firstIndex += 1) {
+      for (let secondIndex = firstIndex + 1; secondIndex < pieces.length; secondIndex += 1) {
+        if (this.canPiecesResolveAsMove(pieces[firstIndex], pieces[secondIndex])) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  private applyRandomColorToPiece(piece: GamePieceBody) {
+    const color = COLORS[Math.floor(Math.random() * COLORS.length)];
+    piece.colorName = color.name;
+    piece.colorValue = (piece.markerType ?? 'none') !== 'none' ? '#ffffff' : color.value;
+  }
+
+  private applyRandomMarkerToPiece(piece: GamePieceBody) {
+    piece.markerType =
+      INNER_MARKER_TYPES[Math.floor(Math.random() * INNER_MARKER_TYPES.length)];
+    piece.colorValue = '#ffffff';
+  }
+
+  private ensureTurnBasedPlayableBoard() {
+    if (!this.isTurnBasedMode() || this.hasAvailableMoves()) {
+      return;
+    }
+
+    const recolorCandidates = this.getPieces().filter(
+      piece =>
+        !piece.pendingDestroy &&
+        !piece.isBomb &&
+        !piece.isColorDestroyer &&
+        (piece.markerType ?? 'none') === 'none'
+    );
+    const remarkCandidates = this.getPieces().filter(
+      piece =>
+        !piece.pendingDestroy &&
+        !piece.isBomb &&
+        !piece.isColorDestroyer &&
+        (piece.markerType ?? 'none') !== 'none'
+    );
+
+    if (recolorCandidates.length >= 2 || remarkCandidates.length >= 2) {
+      for (
+        let attempt = 0;
+        attempt < GAME_CONFIG.turnBased.reshuffleMaxAttempts && !this.hasAvailableMoves();
+        attempt += 1
+      ) {
+        recolorCandidates.forEach(piece => {
+          this.applyRandomColorToPiece(piece);
+        });
+
+        remarkCandidates.forEach(piece => {
+          this.applyRandomMarkerToPiece(piece);
+        });
+      }
+
+      if (!this.hasAvailableMoves() && recolorCandidates.length >= 2) {
+        const forcedColor = COLORS[Math.floor(Math.random() * COLORS.length)];
+        recolorCandidates[0].colorName = forcedColor.name;
+        recolorCandidates[0].colorValue = forcedColor.value;
+        recolorCandidates[1].colorName = forcedColor.name;
+        recolorCandidates[1].colorValue = forcedColor.value;
+      }
+
+      if (!this.hasAvailableMoves() && remarkCandidates.length >= 2) {
+        const forcedMarker =
+          INNER_MARKER_TYPES[Math.floor(Math.random() * INNER_MARKER_TYPES.length)];
+        remarkCandidates[0].markerType = forcedMarker;
+        remarkCandidates[0].colorValue = '#ffffff';
+        remarkCandidates[1].markerType = forcedMarker;
+        remarkCandidates[1].colorValue = '#ffffff';
+      }
+    }
   }
 
   private spawnWave() {
     if (
+      this.isTurnBasedMode() ||
       this.roundEnded ||
       this.isPaused ||
       this.isResumeCountdownActive ||
@@ -864,6 +1163,7 @@ export class GravitySmashGame {
 
   private scheduleSpawn() {
     if (
+      this.isTurnBasedMode() ||
       this.roundEnded ||
       this.isPaused ||
       this.isResumeCountdownActive ||
@@ -884,6 +1184,10 @@ export class GravitySmashGame {
   }
 
   private scheduleSpawnAfterDelay(delay: number) {
+    if (this.isTurnBasedMode()) {
+      return;
+    }
+
     this.clearSpawnTimer();
     this.nextSpawnDueAt = performance.now() + delay;
 
@@ -1053,7 +1357,8 @@ export class GravitySmashGame {
       const firstPiece = this.selectedPiece;
       this.clearSelection();
       this.destroyPieces(firstPiece, clickedPiece, {
-        includeTouchingSameColor: isPlainColorMatch
+        includeTouchingSameColor: isPlainColorMatch,
+        includeTouchingSameMarker: isMarkedMatch
       });
       return;
     }
@@ -1066,7 +1371,14 @@ export class GravitySmashGame {
       return;
     }
 
-    this.levelDestroyed = this.levelGoal;
+    if (this.levelGoalType === 'normal') {
+      this.levelNormalDestroyed = this.levelGoal;
+    } else if (this.levelGoalType === 'special') {
+      this.levelSpecialDestroyed = this.levelGoal;
+    } else {
+      this.levelDestroyed = this.levelGoal;
+    }
+
     this.updateHud();
     this.endRound('win');
   }
@@ -1081,6 +1393,15 @@ export class GravitySmashGame {
     );
   }
 
+  private isMarkerChainMatchCandidate(piece: GamePieceBody, targetMarkerType: string) {
+    return (
+      !piece.pendingDestroy &&
+      !piece.isBomb &&
+      !piece.isColorDestroyer &&
+      (piece.markerType ?? 'none') === targetMarkerType
+    );
+  }
+
   private collectTouchingColorCluster(seedBodies: GamePieceBody[]) {
     const targetColorName = seedBodies[0]?.colorName;
     if (!targetColorName) {
@@ -1091,7 +1412,9 @@ export class GravitySmashGame {
       this.isChainMatchCandidate(piece, targetColorName)
     );
     const cluster = new Set<GamePieceBody>();
-    const queue = seedBodies.filter(piece => this.isChainMatchCandidate(piece, targetColorName));
+    const queue = seedBodies.filter(piece =>
+      this.isChainMatchCandidate(piece, targetColorName)
+    );
 
     queue.forEach(piece => {
       cluster.add(piece);
@@ -1100,8 +1423,53 @@ export class GravitySmashGame {
     for (let index = 0; index < queue.length; index += 1) {
       const currentPiece = queue[index];
       const touchingPieces = Query.collides(currentPiece, candidates)
-        .map(result => result.bodyA === currentPiece ? (result.bodyB as GamePieceBody) : (result.bodyA as GamePieceBody))
+        .map(result =>
+          result.bodyA === currentPiece
+            ? (result.bodyB as GamePieceBody)
+            : (result.bodyA as GamePieceBody)
+        )
         .filter(piece => this.isChainMatchCandidate(piece, targetColorName));
+
+      touchingPieces.forEach(piece => {
+        if (cluster.has(piece)) {
+          return;
+        }
+
+        cluster.add(piece);
+        queue.push(piece);
+      });
+    }
+
+    return Array.from(cluster);
+  }
+
+  private collectTouchingMarkerCluster(seedBodies: GamePieceBody[]) {
+    const targetMarkerType = seedBodies[0]?.markerType ?? 'none';
+    if (targetMarkerType === 'none') {
+      return seedBodies;
+    }
+
+    const candidates = this.getPieces().filter(piece =>
+      this.isMarkerChainMatchCandidate(piece, targetMarkerType)
+    );
+    const cluster = new Set<GamePieceBody>();
+    const queue = seedBodies.filter(piece =>
+      this.isMarkerChainMatchCandidate(piece, targetMarkerType)
+    );
+
+    queue.forEach(piece => {
+      cluster.add(piece);
+    });
+
+    for (let index = 0; index < queue.length; index += 1) {
+      const currentPiece = queue[index];
+      const touchingPieces = Query.collides(currentPiece, candidates)
+        .map(result =>
+          result.bodyA === currentPiece
+            ? (result.bodyB as GamePieceBody)
+            : (result.bodyA as GamePieceBody)
+        )
+        .filter(piece => this.isMarkerChainMatchCandidate(piece, targetMarkerType));
 
       touchingPieces.forEach(piece => {
         if (cluster.has(piece)) {
@@ -1119,10 +1487,18 @@ export class GravitySmashGame {
   private destroyPieces(
     a: GamePieceBody,
     b: GamePieceBody,
-    options?: { includeTouchingSameColor?: boolean }
+    options?: {
+      includeTouchingSameColor?: boolean;
+      includeTouchingSameMarker?: boolean;
+    }
   ) {
     if (options?.includeTouchingSameColor) {
       this.destroyBodies(this.collectTouchingColorCluster([a, b]));
+      return;
+    }
+
+    if (options?.includeTouchingSameMarker) {
+      this.destroyBodies(this.collectTouchingMarkerCluster([a, b]));
       return;
     }
 
@@ -1266,21 +1642,25 @@ export class GravitySmashGame {
     return true;
   }
 
-  private burnBottomPieces() {
+  private getBottomBodies() {
     const floorY = this.arena.y + this.arena.height;
     const burnThreshold = 8;
+    return this.getPieces().filter(
+      body => !body.pendingDestroy && body.bounds.max.y >= floorY - burnThreshold
+    );
+  }
+
+  private burnBottomPieces(bottomBodies = this.getBottomBodies()) {
+    const floorY = this.arena.y + this.arena.height;
     const center = {
       x: this.arena.x + this.arena.width * 0.5,
       y: floorY - 6
     };
-    const bottomBodies = this.getPieces().filter(
-      body => !body.pendingDestroy && body.bounds.max.y >= floorY - burnThreshold
-    );
 
     if (!bottomBodies.length) {
       this.spawnParticles(center.x, center.y, '#ff8d2b');
       this.createBlastWave(center.x, center.y);
-      return;
+      return 0;
     }
 
     const burnCenter = {
@@ -1292,6 +1672,7 @@ export class GravitySmashGame {
 
     this.spawnParticles(burnCenter.x, burnCenter.y, '#ff8d2b');
     this.destroyBodies(bottomBodies, burnCenter);
+    return bottomBodies.length;
   }
 
   private destroyBodies(
@@ -1320,6 +1701,8 @@ export class GravitySmashGame {
     });
 
     this.economy.awardForDestroyedBodies(uniqueBodies);
+    const normalDestroyed = uniqueBodies.filter(body => this.isNormalGoalPiece(body)).length;
+    const specialDestroyed = uniqueBodies.filter(body => this.isSpecialGoalPiece(body)).length;
 
     const center = effectCenter ?? {
       x:
@@ -1333,13 +1716,22 @@ export class GravitySmashGame {
     this.spawnParticles(center.x, center.y, '#ffffff');
     this.createBlastWave(center.x, center.y);
 
-    this.levelDestroyed = Math.min(this.levelGoal, this.levelDestroyed + uniqueBodies.length);
+    this.levelDestroyed += uniqueBodies.length;
+    this.levelNormalDestroyed += normalDestroyed;
+    this.levelSpecialDestroyed += specialDestroyed;
     this.onAudioEvent?.({ type: 'destroy', count: uniqueBodies.length });
     this.emitProgressChange();
     this.updateHud();
 
-    if (this.levelDestroyed >= this.levelGoal) {
+    if (this.isGoalReached()) {
       this.completeLevel();
+      return;
+    }
+
+    if (this.isTurnBasedMode()) {
+      this.resolveTurnBasedStep({
+        consumeTurn: !this.suppressTurnBasedMoveConsumption
+      });
     }
   }
 
@@ -1364,6 +1756,26 @@ export class GravitySmashGame {
     }
   }
 
+  private checkTurnBasedOverflow() {
+    const hasOverflowingPiece = this.getPieces().some(
+      body => body.bounds.min.y <= this.arena.dangerLineY
+    );
+
+    if (!hasOverflowingPiece) {
+      this.turnBasedOverflowWarningActive = false;
+      return;
+    }
+
+    if (!this.turnBasedOverflowWarningActive) {
+      this.turnBasedOverflowWarningActive = true;
+      return;
+    }
+
+    if (this.turnBasedOverflowCheckConsumesTurn) {
+      this.endRound('lose');
+    }
+  }
+
   private updateParticles(delta: number) {
     this.particles = this.particles.filter(particle => {
       particle.life -= delta;
@@ -1383,11 +1795,25 @@ export class GravitySmashGame {
 
   private showOverlay(mode: 'win' | 'lose') {
     if (mode === 'win') {
-      this.setUiState(getWinOverlayState(this.currentLevel, this.levelGoal));
+      this.setUiState(
+        getWinOverlayState(
+          this.currentLevel,
+          this.levelGoal,
+          this.mode,
+          this.levelGoalType
+        )
+      );
       return;
     }
 
-    this.setUiState(getLoseOverlayState(this.currentLevel, this.levelGoal));
+    this.setUiState(
+      getLoseOverlayState(
+        this.currentLevel,
+        this.levelGoal,
+        this.mode,
+        this.levelGoalType
+      )
+    );
   }
 
   private endRound(mode: 'win' | 'lose') {
@@ -1395,33 +1821,33 @@ export class GravitySmashGame {
       return;
     }
 
-    if (mode === 'win') {
-      this.highestUnlockedLevel = Math.max(
-        this.highestUnlockedLevel,
-        this.currentLevel + 1
-      );
-    }
-
     this.roundEnded = true;
     this.isPaused = false;
     this.isResumeCountdownActive = false;
     this.freezeSpawnRemainingMs = null;
     this.freezeEndsAt = null;
+    this.freezeTurnsRemaining = 0;
     this.fireEndsAt = null;
     this.spectrumEndsAt = null;
+    this.turnBasedOverflowCheckAt = null;
     this.clearSpawnTimer();
     this.clearResumeCountdownTimer();
     this.clearFreezeTimer();
     this.clearFireTimer();
     this.clearSpectrumTimer();
+    this.lastRoundOutcome = mode;
+
+    if (mode === 'win') {
+      this.highestUnlockedLevel = Math.max(this.highestUnlockedLevel, this.currentLevel + 1);
+    }
 
     if (this.runner) {
       Runner.stop(this.runner);
     }
 
     this.onAudioEvent?.({ type: 'round', result: mode });
-    this.showOverlay(mode);
     this.emitProgressChange();
+    this.showOverlay(mode);
     this.updateHud();
   }
 
@@ -1504,7 +1930,7 @@ export class GravitySmashGame {
     this.isPaused = false;
     this.isResumeCountdownActive = true;
     this.clearResumeCountdownTimer();
-    this.setUiState(getResumeCountdownOverlayState(secondsLeft));
+    this.setUiState(getResumeCountdownOverlayState(secondsLeft, this.mode));
 
     if (secondsLeft <= 1) {
       this.resumeCountdownTimer = window.setTimeout(() => {
@@ -1577,7 +2003,12 @@ export class GravitySmashGame {
     this.walls = {};
     this.freezeSpawnRemainingMs = null;
     this.freezeEndsAt = null;
+    this.freezeTurnsRemaining = 0;
     this.fireEndsAt = null;
     this.spectrumEndsAt = null;
+    this.turnBasedOverflowCheckAt = null;
+    this.turnBasedOverflowCheckConsumesTurn = false;
+    this.turnBasedOverflowWarningActive = false;
+    this.suppressTurnBasedMoveConsumption = false;
   }
 }

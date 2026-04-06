@@ -1,4 +1,4 @@
-import type { ColorDefinition, MarkerType, ShapeType } from './types';
+﻿import type { ColorDefinition, MarkerType, ShapeType } from './types';
 
 export const COLORS: ColorDefinition[] = [
   { name: 'red', value: '#ff0000' },
@@ -31,7 +31,7 @@ export const INNER_MARKER_TYPES: MarkerType[] = [
 export const INITIAL_LEVEL = 1;
 
 export const GAME_CONFIG = {
-  // Размеры фигур: базовый размер и множители для обычных и больших фигур.
+  // Sizes: base figure size and multipliers for small/huge pieces.
   sizes: {
     rootMinFactor: 0.065,
     rootMaxFactor: 0.085,
@@ -41,7 +41,7 @@ export const GAME_CONFIG = {
     hugeMultiplierMax: 2.6
   },
 
-  // Физика материала и столкновений.
+  // Core physics and collision tuning.
   physics: {
     restitution: 0.08,
     friction: 0.22,
@@ -52,7 +52,7 @@ export const GAME_CONFIG = {
     baseGravityY: 1.92
   },
 
-  // Рост сложности по уровням.
+  // Timed arcade mode progression.
   progression: {
     gravityPerLevel: 0.02,
     timeScaleBase: 1,
@@ -61,7 +61,29 @@ export const GAME_CONFIG = {
     levelGoalPerLevel: 4
   },
 
-  // Все, что связано со спавном фигур и волн.
+  // Turn-based mode progression.
+  turnBased: {
+    baseGravityScale: 0.88,
+    initialPiecesBase: 6,
+    initialPiecesGrowthEveryLevels: 3,
+    initialPiecesMax: 11,
+    normalGoalBase: 14,
+    normalGoalPerLevel: 3,
+    specialGoalStartLevel: 5,
+    specialGoalEveryLevels: 3,
+    specialGoalBase: 5,
+    specialGoalPerTier: 1,
+    turnSpawnBase: 4,
+    turnSpawnGrowthEveryLevels: 6,
+    turnSpawnBonusStartLevel: 4,
+    turnSpawnMax: 8,
+    emptyBoardRefillCount: 8,
+    specialGoalSpecialSpawnMultiplier: 1.85,
+    overflowSettleMs: 1500,
+    reshuffleMaxAttempts: 18
+  },
+
+  // Timed spawn behavior for the arcade mode.
   spawn: {
     intervalMinMs: 820,
     intervalMaxMs: 1180,
@@ -83,7 +105,7 @@ export const GAME_CONFIG = {
     initialDelayMs: 260
   },
 
-  // Параметры появления и действия бомб.
+  // Bomb spawn and blast tuning.
   bombs: {
     startLevel: 10,
     chancePerLevel: 0.02,
@@ -92,61 +114,62 @@ export const GAME_CONFIG = {
     minBlastRadius: 92
   },
 
-  // Параметры фигуры, которая удаляет все фигуры выбранного цвета.
+  // Color destroyer spawn tuning.
   colorDestroyers: {
     startLevel: 8,
-    chancePerLevel: 0.01, // было 0.025
-    maxChance: 0.08 // было 0.12
+    chancePerLevel: 0.01,
+    maxChance: 0.08
   },
 
-  // Насколько медленнее спецфигуры должны наращивать частоту,
-  // когда общий темп спавна и размер волн увеличиваются.
+  // How much special piece frequency should slow down when the arcade tempo rises.
   specials: {
     tempoPenaltyPerStep: 0.45,
-    wavePenaltyPerExtraPiece: 0.28
+    wavePenaltyPerExtraPiece: 0.28,
+    activeSpecialSpawnPenaltyMultiplier: 0.12
   },
 
-  // Спец-комбо между особыми фигурами.
+  // Combo tuning between special pieces.
   combos: {
     bombDestroyerBlastRadiusFactor: 0.92,
     bombDestroyerMinBlastRadius: 240
   },
 
-  // Когда и как в игру добавляются фигуры с маленькими символами внутри.
+  // Marker figure introduction and scaling.
   markers: {
     startLevel: 5,
     chancePerLevel: 0.05,
     maxChance: 0.36
   },
 
-  // Частицы и визуальные вспышки при уничтожении фигур.
+  // Destroy particles and flash effects.
   particles: {
     lifeMs: 500,
     count: 14
   },
 
-  // Награды за уничтожение фигур.
+  // Rewards for destroyed figures.
   rewards: {
     normalFigurePoints: 2,
     markedFigurePoints: 6
   },
 
-  // Активные способности, которые игрок может покупать за монеты.
+  // Player abilities.
   abilities: {
     freezeCost: 50,
     freezeDurationMs: 3000,
+    freezeTurnDuration: 3,
     fireCost: 40,
     fireDurationMs: 400,
     spectrumCost: 50,
     spectrumDurationMs: 850
   },
 
-  // Правила раунда: когда считается, что игрок проиграл.
+  // Round loss conditions.
   round: {
     overflowMs: 1900
   },
 
-  // Резерв под будущий баланс импульсов или внешних сил.
+  // Misc future balance hooks.
   tuning: {
     baseImpulse: 0.0051
   }

@@ -22,6 +22,9 @@ export type MarkerType =
   | 'letter-a'
   | 'letter-t';
 
+export type GameMode = 'arcade' | 'turn-based';
+export type LevelGoalType = 'all' | 'normal' | 'special';
+
 export interface Arena {
   x: number;
   y: number;
@@ -33,8 +36,10 @@ export interface Arena {
 }
 
 export interface LevelSettings {
+  mode: GameMode;
   level: number;
   goal: number;
+  goalType: LevelGoalType;
   gravityY: number;
   timeScale: number;
   spawnMin: number;
@@ -48,6 +53,9 @@ export interface LevelSettings {
   guaranteedExtraSpawns: number;
   baseWavePieces: number;
   speedMultiplier: number;
+  initialPieces: number;
+  turnSpawnMin: number;
+  turnSpawnMax: number;
 }
 
 export interface Particle {
@@ -100,6 +108,7 @@ export interface GameProgressSnapshot {
 }
 
 export interface GameUiState {
+  progressLabelText: string;
   progressCountText: string;
   progressSubText: string;
   levelCountText: string;
@@ -132,6 +141,7 @@ export interface GameControllerOptions {
   bottomBar: HTMLElement;
   onUiChange: (state: GameUiState) => void;
   onAudioEvent?: (event: GameAudioEvent) => void;
+  mode?: GameMode;
   initialProgress?: GameProgressSnapshot | null;
   onProgressChange?: (progress: GameProgressSnapshot) => void;
 }
