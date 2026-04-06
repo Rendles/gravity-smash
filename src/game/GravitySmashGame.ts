@@ -47,6 +47,7 @@ import type {
   EconomySnapshot,
   GameControllerOptions,
   GamePieceBody,
+  GameProgressSnapshot,
   GameUiState,
   LevelSettings,
   Particle,
@@ -102,6 +103,7 @@ export class GravitySmashGame {
   private readonly bottomBar: HTMLElement;
   private readonly onUiChange: (state: GameUiState) => void;
   private readonly onAudioEvent?: (event: GameAudioEvent) => void;
+  private readonly onProgressChange?: (progress: GameProgressSnapshot) => void;
 
   private engine: Engine | null = null;
   private render: Render | null = null;
@@ -133,6 +135,7 @@ export class GravitySmashGame {
   private isPaused = false;
   private isResumeCountdownActive = false;
   private currentLevel = INITIAL_LEVEL;
+  private highestUnlockedLevel = INITIAL_LEVEL;
   private levelGoal = 0;
   private levelDestroyed = 0;
   private currentDifficulty: LevelSettings | null = null;
@@ -187,11 +190,22 @@ export class GravitySmashGame {
     this.bottomBar = options.bottomBar;
     this.onUiChange = options.onUiChange;
     this.onAudioEvent = options.onAudioEvent;
+    this.onProgressChange = options.onProgressChange;
+
+    if (options.initialProgress) {
+      this.highestUnlockedLevel = Math.max(
+        INITIAL_LEVEL,
+        Math.floor(options.initialProgress.highestUnlockedLevel)
+      );
+      this.economy.hydrate(options.initialProgress.economy);
+    }
+
     window.addEventListener('resize', this.resizeHandler);
   }
 
   startLevel(level: number) {
-    this.currentLevel = Math.max(1, level);
+    this.currentLevel = Math.max(INITIAL_LEVEL, level);
+    this.highestUnlockedLevel = Math.max(this.highestUnlockedLevel, this.currentLevel);
     this.levelGoal = getLevelSettings(this.currentLevel).goal;
     this.levelDestroyed = 0;
     this.roundEnded = false;
@@ -260,6 +274,7 @@ export class GravitySmashGame {
     this.applyDifficultyState();
     this.updateHud();
     this.scheduleSpawnAfterDelay(GAME_CONFIG.spawn.initialDelayMs);
+    this.emitProgressChange();
   }
 
   restartCurrentLevel() {
@@ -293,6 +308,7 @@ export class GravitySmashGame {
 
     this.startFreezeEffect(GAME_CONFIG.abilities.freezeDurationMs);
     this.onAudioEvent?.({ type: 'ability', ability: 'freeze' });
+    this.emitProgressChange();
     this.updateHud();
     return true;
   }
@@ -310,6 +326,7 @@ export class GravitySmashGame {
     this.burnBottomPieces();
     this.startFireEffect(GAME_CONFIG.abilities.fireDurationMs);
     this.onAudioEvent?.({ type: 'ability', ability: 'fire' });
+    this.emitProgressChange();
     this.updateHud();
     return true;
   }
@@ -338,6 +355,7 @@ export class GravitySmashGame {
 
     this.startSpectrumEffect(GAME_CONFIG.abilities.spectrumDurationMs);
     this.onAudioEvent?.({ type: 'ability', ability: 'spectrum' });
+    this.emitProgressChange();
     this.updateHud();
     return true;
   }
@@ -365,6 +383,14 @@ export class GravitySmashGame {
     return this.economy.getSnapshot();
   }
 
+  getProgressSnapshot(): GameProgressSnapshot {
+    return {
+      resumeLevel: this.getResumeLevel(),
+      highestUnlockedLevel: this.highestUnlockedLevel,
+      economy: this.economy.getSnapshot()
+    };
+  }
+
   getUpgradeCatalog() {
     return UPGRADE_DEFINITIONS;
   }
@@ -372,10 +398,27 @@ export class GravitySmashGame {
   purchaseUpgrade(upgradeId: UpgradeId) {
     const purchased = this.economy.purchaseUpgrade(upgradeId);
     if (purchased) {
+      this.emitProgressChange();
       this.updateHud();
     }
 
     return purchased;
+  }
+
+  private getResumeLevel() {
+    if (this.roundEnded && this.uiState.overlayCardWin) {
+      return Math.min(this.highestUnlockedLevel, this.currentLevel + 1);
+    }
+
+    return this.currentLevel;
+  }
+
+  private emitProgressChange() {
+    this.onProgressChange?.({
+      resumeLevel: this.getResumeLevel(),
+      highestUnlockedLevel: this.highestUnlockedLevel,
+      economy: this.economy.getSnapshot()
+    });
   }
 
   private isFreezeActive() {
@@ -1009,7 +1052,9 @@ export class GravitySmashGame {
     if (isMarkedMatch || isPlainColorMatch) {
       const firstPiece = this.selectedPiece;
       this.clearSelection();
-      this.destroyPieces(firstPiece, clickedPiece);
+      this.destroyPieces(firstPiece, clickedPiece, {
+        includeTouchingSameColor: isPlainColorMatch
+      });
       return;
     }
 
@@ -1026,7 +1071,61 @@ export class GravitySmashGame {
     this.endRound('win');
   }
 
-  private destroyPieces(a: GamePieceBody, b: GamePieceBody) {
+  private isChainMatchCandidate(piece: GamePieceBody, targetColorName: string) {
+    return (
+      !piece.pendingDestroy &&
+      !piece.isBomb &&
+      !piece.isColorDestroyer &&
+      (piece.markerType ?? 'none') === 'none' &&
+      piece.colorName === targetColorName
+    );
+  }
+
+  private collectTouchingColorCluster(seedBodies: GamePieceBody[]) {
+    const targetColorName = seedBodies[0]?.colorName;
+    if (!targetColorName) {
+      return seedBodies;
+    }
+
+    const candidates = this.getPieces().filter(piece =>
+      this.isChainMatchCandidate(piece, targetColorName)
+    );
+    const cluster = new Set<GamePieceBody>();
+    const queue = seedBodies.filter(piece => this.isChainMatchCandidate(piece, targetColorName));
+
+    queue.forEach(piece => {
+      cluster.add(piece);
+    });
+
+    for (let index = 0; index < queue.length; index += 1) {
+      const currentPiece = queue[index];
+      const touchingPieces = Query.collides(currentPiece, candidates)
+        .map(result => result.bodyA === currentPiece ? (result.bodyB as GamePieceBody) : (result.bodyA as GamePieceBody))
+        .filter(piece => this.isChainMatchCandidate(piece, targetColorName));
+
+      touchingPieces.forEach(piece => {
+        if (cluster.has(piece)) {
+          return;
+        }
+
+        cluster.add(piece);
+        queue.push(piece);
+      });
+    }
+
+    return Array.from(cluster);
+  }
+
+  private destroyPieces(
+    a: GamePieceBody,
+    b: GamePieceBody,
+    options?: { includeTouchingSameColor?: boolean }
+  ) {
+    if (options?.includeTouchingSameColor) {
+      this.destroyBodies(this.collectTouchingColorCluster([a, b]));
+      return;
+    }
+
     this.destroyBodies([a, b]);
   }
 
@@ -1236,6 +1335,7 @@ export class GravitySmashGame {
 
     this.levelDestroyed = Math.min(this.levelGoal, this.levelDestroyed + uniqueBodies.length);
     this.onAudioEvent?.({ type: 'destroy', count: uniqueBodies.length });
+    this.emitProgressChange();
     this.updateHud();
 
     if (this.levelDestroyed >= this.levelGoal) {
@@ -1295,6 +1395,13 @@ export class GravitySmashGame {
       return;
     }
 
+    if (mode === 'win') {
+      this.highestUnlockedLevel = Math.max(
+        this.highestUnlockedLevel,
+        this.currentLevel + 1
+      );
+    }
+
     this.roundEnded = true;
     this.isPaused = false;
     this.isResumeCountdownActive = false;
@@ -1314,6 +1421,7 @@ export class GravitySmashGame {
 
     this.onAudioEvent?.({ type: 'round', result: mode });
     this.showOverlay(mode);
+    this.emitProgressChange();
     this.updateHud();
   }
 

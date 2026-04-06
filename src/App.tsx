@@ -2,7 +2,9 @@
 import { GameAudio } from './audio/GameAudio';
 import { GravitySmashGame } from './game/GravitySmashGame';
 import { GAME_CONFIG } from './game/config';
+import type { GameProgressSnapshot } from './game/types';
 import { createInitialUiState } from './game/ui';
+import { loadProgress, saveProgress } from './storage/progressStore';
 
 const SOUND_STORAGE_KEY = 'gravity-smash-sound-enabled';
 
@@ -20,9 +22,38 @@ export default function App() {
   const bottomBarRef = useRef<HTMLDivElement | null>(null);
   const gameRef = useRef<GravitySmashGame | null>(null);
   const audioRef = useRef<GameAudio | null>(null);
+  const pendingProgressSaveRef = useRef<GameProgressSnapshot | null>(null);
+  const progressSaveTimerRef = useRef<number | null>(null);
   const [hasStarted, setHasStarted] = useState(false);
   const [soundEnabled, setSoundEnabled] = useState(getInitialSoundEnabled);
   const [uiState, setUiState] = useState(createInitialUiState);
+  const [savedProgress, setSavedProgress] = useState<GameProgressSnapshot | null>(null);
+  const [progressReady, setProgressReady] = useState(false);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    void loadProgress().then(progress => {
+      if (!isMounted) {
+        return;
+      }
+
+      setSavedProgress(progress);
+      setProgressReady(true);
+    });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (progressSaveTimerRef.current !== null) {
+        window.clearTimeout(progressSaveTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const audio = new GameAudio();
@@ -51,27 +82,59 @@ export default function App() {
   }, [hasStarted]);
 
   useEffect(() => {
-    if (!hasStarted || !gameRootRef.current || !bottomBarRef.current) {
+    if (!hasStarted || !progressReady || !gameRootRef.current || !bottomBarRef.current) {
       return undefined;
     }
+
+    const scheduleProgressSave = (progress: GameProgressSnapshot) => {
+      pendingProgressSaveRef.current = progress;
+
+      if (progressSaveTimerRef.current !== null) {
+        window.clearTimeout(progressSaveTimerRef.current);
+      }
+
+      progressSaveTimerRef.current = window.setTimeout(() => {
+        progressSaveTimerRef.current = null;
+
+        if (!pendingProgressSaveRef.current) {
+          return;
+        }
+
+        void saveProgress(pendingProgressSaveRef.current);
+      }, 120);
+    };
 
     const game = new GravitySmashGame({
       root: gameRootRef.current,
       bottomBar: bottomBarRef.current,
       onUiChange: setUiState,
+      initialProgress: savedProgress,
+      onProgressChange: progress => {
+        setSavedProgress(progress);
+        scheduleProgressSave(progress);
+      },
       onAudioEvent: event => {
         audioRef.current?.playEvent(event);
       }
     });
 
     gameRef.current = game;
-    game.startLevel(1);
+    game.startLevel(savedProgress?.resumeLevel ?? 1);
 
     return () => {
+      if (progressSaveTimerRef.current !== null) {
+        window.clearTimeout(progressSaveTimerRef.current);
+        progressSaveTimerRef.current = null;
+      }
+
+      if (pendingProgressSaveRef.current) {
+        void saveProgress(pendingProgressSaveRef.current);
+      }
+
       game.destroy();
       gameRef.current = null;
     };
-  }, [hasStarted]);
+  }, [hasStarted, progressReady]);
 
   const appClassName = [
     uiState.freezeButtonActive ? 'freeze-active' : '',
@@ -252,12 +315,13 @@ export default function App() {
               id="menu-start-btn"
               className="action-btn"
               type="button"
+              disabled={!progressReady}
               onClick={() => {
                 void audioRef.current?.resume();
                 setHasStarted(true);
               }}
             >
-              Играть
+              {progressReady ? 'Играть' : 'Загрузка...'}
             </button>
             <button
               id="menu-sound-btn"
