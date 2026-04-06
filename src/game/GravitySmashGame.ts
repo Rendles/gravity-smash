@@ -9,13 +9,38 @@ import {
   Runner
 } from 'matter-js';
 import {
-  COLORS,
   GAME_CONFIG,
-  INNER_MARKER_TYPES,
   INITIAL_LEVEL,
-  SHAPES
+  getAbilityCost as getAbilityCostByMode
 } from './config';
 import { getLevelSettings, rand } from './level';
+import {
+  buildProgressSnapshot,
+  createProgressState,
+  markLevelStarted,
+  markRoundEnded,
+  type ProgressState
+} from './GravitySmashGame/progress';
+import { createGamePiece } from './GravitySmashGame/pieceFactory';
+import {
+  canPiecesResolveAsMove,
+  ensureTurnBasedPlayableBoard,
+  getTurnBasedSpawnCount,
+  hasAvailableMoves
+} from './GravitySmashGame/turnBased';
+import {
+  collectTouchingColorCluster,
+  collectTouchingMarkerCluster
+} from './GravitySmashGame/matching';
+import {
+  getBodiesCenter,
+  getBombDetonationResult,
+  getBottomBodies,
+  getColorDestroyerSelectionTargets,
+  getDestroyerBombComboResult,
+  getSpectrumTargetColor as getSpectrumTargetColorFromPieces,
+  getSpectrumTargets
+} from './GravitySmashGame/specials';
 import {
   drawArena,
   drawBlastWaves,
@@ -40,7 +65,13 @@ import {
   getSelectedBarInfo,
   getWinOverlayState
 } from './ui';
-import { PlayerEconomy, UPGRADE_DEFINITIONS } from './economy';
+import {
+  getBombBlastRadiusMultiplier,
+  getFireHeightBonusFactor,
+  getFreezeArcadeDurationMultiplier,
+  getFreezeTurnDuration as getFreezeTurnDurationValue,
+  PlayerEconomy
+} from './economy';
 import type {
   GameAudioEvent,
   Arena,
@@ -109,6 +140,7 @@ export class GravitySmashGame {
   private readonly onAudioEvent?: (event: GameAudioEvent) => void;
   private readonly onProgressChange?: (progress: GameProgressSnapshot) => void;
   private readonly mode: GameMode;
+  private readonly progressState: ProgressState;
 
   private engine: Engine | null = null;
   private render: Render | null = null;
@@ -152,10 +184,10 @@ export class GravitySmashGame {
   private turnBasedOverflowCheckConsumesTurn = false;
   private turnBasedOverflowWarningActive = false;
   private suppressTurnBasedMoveConsumption = false;
+  private pendingGuaranteedSpecialSpawns = 0;
+  private turnBasedTurnsConsumed = 0;
   private uiState = createInitialUiState();
   private readonly economy = new PlayerEconomy();
-  private highestUnlockedLevel = INITIAL_LEVEL;
-  private lastRoundOutcome: 'win' | 'lose' | null = null;
 
   private readonly resizeHandler = () => {
     this.resizeGame();
@@ -220,20 +252,17 @@ export class GravitySmashGame {
     this.onAudioEvent = options.onAudioEvent;
     this.onProgressChange = options.onProgressChange;
     this.mode = options.mode ?? 'arcade';
-    this.highestUnlockedLevel = Math.max(
-      INITIAL_LEVEL,
-      options.initialProgress?.resumeLevel ?? INITIAL_LEVEL,
-      options.initialProgress?.highestUnlockedLevel ?? INITIAL_LEVEL
-    );
+    this.progressState = createProgressState(options.initialProgress);
     this.economy.hydrate(options.initialProgress?.economy ?? null);
     window.addEventListener('resize', this.resizeHandler);
   }
 
   startLevel(level: number) {
     this.currentLevel = Math.max(1, level);
-    this.highestUnlockedLevel = Math.max(this.highestUnlockedLevel, this.currentLevel);
-    this.levelGoal = getLevelSettings(this.currentLevel, this.mode).goal;
-    this.levelGoalType = getLevelSettings(this.currentLevel, this.mode).goalType;
+    markLevelStarted(this.progressState, this.currentLevel);
+    const levelSettings = getLevelSettings(this.currentLevel, this.mode);
+    this.levelGoal = levelSettings.goal;
+    this.levelGoalType = levelSettings.goalType;
     this.levelDestroyed = 0;
     this.levelNormalDestroyed = 0;
     this.levelSpecialDestroyed = 0;
@@ -248,11 +277,12 @@ export class GravitySmashGame {
     this.spectrumEndsAt = null;
     this.turnBasedOverflowCheckAt = null;
     this.suppressTurnBasedMoveConsumption = false;
+    this.pendingGuaranteedSpecialSpawns = 0;
+    this.turnBasedTurnsConsumed = 0;
     this.particles = [];
     this.blastWaves = [];
     this.currentDifficulty = null;
     this.selectedPiece = null;
-    this.lastRoundOutcome = null;
 
     this.setUiState({
       overlayVisible: false,
@@ -305,6 +335,8 @@ export class GravitySmashGame {
     });
 
     this.applyDifficultyState();
+    this.pendingGuaranteedSpecialSpawns =
+      getLevelSettings(this.currentLevel, this.mode).guaranteedEarlySpecialSpawns;
     this.updateHud();
 
     if (this.isTurnBasedMode()) {
@@ -342,12 +374,12 @@ export class GravitySmashGame {
       return false;
     }
 
-    if (!this.economy.spendPoints(GAME_CONFIG.abilities.freezeCost)) {
+    if (!this.economy.spendPoints(this.getAbilityCost('freeze'))) {
       this.updateHud();
       return false;
     }
 
-    this.startFreezeEffect(GAME_CONFIG.abilities.freezeDurationMs);
+    this.startFreezeEffect(this.getFreezeDurationMs(), this.getFreezeTurnCount());
     this.onAudioEvent?.({ type: 'ability', ability: 'freeze' });
     this.emitProgressChange();
     this.updateHud();
@@ -359,13 +391,13 @@ export class GravitySmashGame {
       return false;
     }
 
-    const burnableBodies = this.getBottomBodies();
+    const burnableBodies = this.getBottomBodies(this.getFireBurnHeight());
     if (!burnableBodies.length) {
       this.updateHud();
       return false;
     }
 
-    if (!this.economy.spendPoints(GAME_CONFIG.abilities.fireCost)) {
+    if (!this.economy.spendPoints(this.getAbilityCost('fire'))) {
       this.updateHud();
       return false;
     }
@@ -389,13 +421,13 @@ export class GravitySmashGame {
       return false;
     }
 
-    const targetColorName = this.getRandomSpectrumTargetColor();
+    const targetColorName = this.getSpectrumTargetColor();
     if (!targetColorName) {
       this.updateHud();
       return false;
     }
 
-    if (!this.economy.spendPoints(GAME_CONFIG.abilities.spectrumCost)) {
+    if (!this.economy.spendPoints(this.getAbilityCost('spectrum'))) {
       this.updateHud();
       return false;
     }
@@ -404,7 +436,7 @@ export class GravitySmashGame {
     let destroyed = false;
 
     try {
-      destroyed = this.destroyRandomColorGroup(targetColorName);
+      destroyed = this.destroySpectrumColorGroup(targetColorName);
     } finally {
       this.suppressTurnBasedMoveConsumption = false;
     }
@@ -445,21 +477,15 @@ export class GravitySmashGame {
   }
 
   getProgressSnapshot(): GameProgressSnapshot {
-    const resumeLevel =
-      this.lastRoundOutcome === 'win'
-        ? Math.max(this.currentLevel + 1, this.highestUnlockedLevel)
-        : this.currentLevel;
-    const normalizedResumeLevel = Math.max(INITIAL_LEVEL, resumeLevel);
-
-    return {
-      resumeLevel: normalizedResumeLevel,
-      highestUnlockedLevel: Math.max(this.highestUnlockedLevel, normalizedResumeLevel),
-      economy: this.economy.getSnapshot()
-    };
+    return buildProgressSnapshot(
+      this.progressState,
+      this.currentLevel,
+      this.economy.getSnapshot()
+    );
   }
 
   getUpgradeCatalog() {
-    return UPGRADE_DEFINITIONS;
+    return this.economy.getUpgradeCatalog();
   }
 
   purchaseUpgrade(upgradeId: UpgradeId) {
@@ -478,6 +504,36 @@ export class GravitySmashGame {
 
   private isTurnBasedMode() {
     return this.mode === 'turn-based';
+  }
+
+  private getBombBlastMultiplier() {
+    return getBombBlastRadiusMultiplier(this.economy.getUpgradeLevel('blast-radius'));
+  }
+
+  private getAbilityCost(ability: 'freeze' | 'fire' | 'spectrum') {
+    return getAbilityCostByMode(this.mode, ability);
+  }
+
+  private getFireBurnHeight() {
+    const bonusFactor = getFireHeightBonusFactor(
+      this.economy.getUpgradeLevel('fire-height')
+    );
+
+    return GAME_CONFIG.abilities.fireBaseBurnHeightPx + this.arena.height * bonusFactor;
+  }
+
+  private getFreezeDurationMs() {
+    const multiplier = getFreezeArcadeDurationMultiplier(
+      this.economy.getUpgradeLevel('freeze-duration')
+    );
+
+    return Math.round(GAME_CONFIG.abilities.freezeDurationMs * multiplier);
+  }
+
+  private getFreezeTurnCount() {
+    return getFreezeTurnDurationValue(
+      this.economy.getUpgradeLevel('freeze-duration')
+    );
   }
 
   private isSpecialGoalPiece(body: GamePieceBody) {
@@ -533,9 +589,12 @@ export class GravitySmashGame {
     return Math.min(1, remainingMs / GAME_CONFIG.abilities.fireDurationMs);
   }
 
-  private startFreezeEffect(durationMs: number) {
+  private startFreezeEffect(durationMs: number, turnDuration: number) {
     if (this.isTurnBasedMode()) {
-      this.freezeTurnsRemaining += GAME_CONFIG.abilities.freezeTurnDuration;
+      this.freezeTurnsRemaining = Math.min(
+        GAME_CONFIG.upgrades.freezeTurnMaxTurns,
+        this.freezeTurnsRemaining + turnDuration
+      );
       this.updateHud();
       return;
     }
@@ -765,7 +824,7 @@ export class GravitySmashGame {
     const freezeActive = this.isFreezeActive();
     const fireActive = this.isFireActive();
     const spectrumActive = this.isSpectrumActive();
-    const hasSpectrumTarget = this.getRandomSpectrumTargetColor() !== null;
+    const hasSpectrumTarget = this.getSpectrumTargetColor() !== null;
 
     this.setUiState({
       progressLabelText: getProgressLabelText(this.mode, this.levelGoalType),
@@ -786,18 +845,18 @@ export class GravitySmashGame {
       freezeButtonDisabled:
         this.roundEnded ||
         isInteractionPaused ||
-        !this.economy.canAfford(GAME_CONFIG.abilities.freezeCost),
+        !this.economy.canAfford(this.getAbilityCost('freeze')),
       freezeButtonActive: freezeActive,
       fireButtonDisabled:
         this.roundEnded ||
         isInteractionPaused ||
-        !this.economy.canAfford(GAME_CONFIG.abilities.fireCost),
+        !this.economy.canAfford(this.getAbilityCost('fire')),
       fireButtonActive: fireActive,
       spectrumButtonDisabled:
         this.roundEnded ||
         isInteractionPaused ||
         !hasSpectrumTarget ||
-        !this.economy.canAfford(GAME_CONFIG.abilities.spectrumCost),
+        !this.economy.canAfford(this.getAbilityCost('spectrum')),
       spectrumButtonActive: spectrumActive,
       barInfoText:
         isInteractionPaused
@@ -823,137 +882,77 @@ export class GravitySmashGame {
     this.updateHud();
   }
 
-  private createPiece(position?: { x?: number; y?: number }) {
+  private getSpawnAssistState() {
+    const pieces = this.getPieces().filter(piece => !piece.pendingDestroy);
+    if (!pieces.length) {
+      return null;
+    }
+
+    const highestPieceTop = Math.min(...pieces.map(piece => piece.bounds.min.y));
+    const warningThresholdY =
+      this.arena.dangerLineY +
+      this.arena.height * GAME_CONFIG.specials.softAssist.warningDistanceFactor;
+    const criticalThresholdY =
+      this.arena.dangerLineY +
+      this.arena.height * GAME_CONFIG.specials.softAssist.criticalDistanceFactor;
+
+    if (highestPieceTop <= criticalThresholdY || this.turnBasedOverflowWarningActive) {
+      return {
+        hugeChanceMultiplier: GAME_CONFIG.specials.softAssist.criticalHugeChanceMultiplier,
+        bombChanceMultiplier: GAME_CONFIG.specials.softAssist.criticalBombChanceMultiplier,
+        colorDestroyerChanceMultiplier:
+          GAME_CONFIG.specials.softAssist.criticalDestroyerChanceMultiplier
+      };
+    }
+
+    if (highestPieceTop <= warningThresholdY) {
+      return {
+        hugeChanceMultiplier: GAME_CONFIG.specials.softAssist.warningHugeChanceMultiplier,
+        bombChanceMultiplier: GAME_CONFIG.specials.softAssist.warningBombChanceMultiplier,
+        colorDestroyerChanceMultiplier:
+          GAME_CONFIG.specials.softAssist.warningDestroyerChanceMultiplier
+      };
+    }
+
+    return null;
+  }
+
+  private consumeForcedSpawnKind() {
+    if (
+      this.isTurnBasedMode() &&
+      this.pendingGuaranteedSpecialSpawns > 0 &&
+      this.currentDifficulty &&
+      this.turnBasedTurnsConsumed <= this.currentDifficulty.guaranteedEarlySpecialTurns
+    ) {
+      this.pendingGuaranteedSpecialSpawns = Math.max(
+        0,
+        this.pendingGuaranteedSpecialSpawns - 1
+      );
+      return 'marker' as const;
+    }
+
+    return 'auto' as const;
+  }
+
+  private createPiece(
+    position?: { x?: number; y?: number },
+    forcedKind: 'auto' | 'normal' | 'marker' | 'bomb' | 'color-destroyer' = 'auto'
+  ) {
     const difficulty =
       this.currentDifficulty ?? getLevelSettings(this.currentLevel, this.mode);
     const hasActiveSpecialPiece = this.getPieces().some(
       piece =>
         !piece.pendingDestroy && (piece.isBomb || piece.isColorDestroyer)
     );
-    const specialSpawnPenalty = hasActiveSpecialPiece
-      ? GAME_CONFIG.specials.activeSpecialSpawnPenaltyMultiplier
-      : 1;
-    const adjustedColorDestroyerChance =
-      difficulty.colorDestroyerChance * specialSpawnPenalty;
-    const adjustedBombChance = difficulty.bombChance * specialSpawnPenalty;
-    const specialRoll = Math.random();
-    const isColorDestroyer = specialRoll < adjustedColorDestroyerChance;
-    const isBomb =
-      !isColorDestroyer &&
-      specialRoll < adjustedColorDestroyerChance + adjustedBombChance;
-    const shape = isColorDestroyer
-      ? 'color-destroyer'
-      : isBomb
-        ? 'bomb'
-        : SHAPES[Math.floor(Math.random() * SHAPES.length)];
-    const color = isColorDestroyer
-      ? { name: 'spectrum', value: '#ffffff' }
-      : isBomb
-        ? { name: 'bomb', value: '#ffb347' }
-        : COLORS[Math.floor(Math.random() * COLORS.length)];
-    const markerType =
-      !isBomb && !isColorDestroyer && Math.random() < difficulty.markedChance
-        ? INNER_MARKER_TYPES[Math.floor(Math.random() * INNER_MARKER_TYPES.length)]
-        : 'none';
-    const visualColorValue = markerType !== 'none' ? '#ffffff' : color.value;
-    const sizeMode = Math.random() < difficulty.hugeChance ? 'huge' : 'small';
-    const rootSize = rand(
-      this.arena.width * GAME_CONFIG.sizes.rootMinFactor,
-      this.arena.width * GAME_CONFIG.sizes.rootMaxFactor
-    );
-    const sizeMultiplier =
-      sizeMode === 'huge'
-        ? rand(
-            GAME_CONFIG.sizes.hugeMultiplierMin,
-            GAME_CONFIG.sizes.hugeMultiplierMax
-          )
-        : rand(
-            GAME_CONFIG.sizes.smallMultiplierMin,
-            GAME_CONFIG.sizes.smallMultiplierMax
-          );
-    const baseSize = rootSize * sizeMultiplier;
-
-    const horizontalMargin = Math.max(26, baseSize * 0.95);
-    const x =
-      position?.x ??
-      rand(
-        this.arena.x + horizontalMargin,
-        this.arena.x + this.arena.width - horizontalMargin
-      );
-    const y = position?.y ?? this.arena.spawnY;
-
-    const options = {
-      restitution: GAME_CONFIG.physics.restitution,
-      friction: GAME_CONFIG.physics.friction,
-      frictionStatic: 0.92,
-      frictionAir: GAME_CONFIG.physics.frictionAir,
-      slop: GAME_CONFIG.physics.contactSlop,
-      density: 0.00175,
-      render: {
-        visible: false
-      }
-    };
-
-    let piece: GamePieceBody;
-
-    switch (shape) {
-      case 'color-destroyer':
-        piece = Bodies.polygon(x, y, 6, baseSize * 0.58, options) as GamePieceBody;
-        Body.setAngle(piece, rand(-0.24, 0.24));
-        break;
-      case 'bomb':
-        piece = Bodies.circle(x, y, baseSize * 0.48, options) as GamePieceBody;
-        piece.isCircleShape = true;
-        break;
-      case 'circle':
-        piece = Bodies.circle(x, y, baseSize * 0.5, options) as GamePieceBody;
-        piece.isCircleShape = true;
-        break;
-      case 'square':
-        piece = Bodies.rectangle(x, y, baseSize, baseSize, {
-          ...options,
-          chamfer: { radius: Math.max(4, baseSize * 0.14) }
-        }) as GamePieceBody;
-        Body.setAngle(piece, rand(-0.2, 0.2));
-        break;
-      case 'triangle':
-        piece = Bodies.polygon(x, y, 3, baseSize * 0.64, options) as GamePieceBody;
-        Body.setAngle(piece, rand(-0.45, 0.45));
-        break;
-      case 'pentagon':
-        piece = Bodies.polygon(x, y, 5, baseSize * 0.6, options) as GamePieceBody;
-        Body.setAngle(piece, rand(-0.3, 0.3));
-        break;
-      case 'hexagon':
-        piece = Bodies.polygon(x, y, 6, baseSize * 0.6, options) as GamePieceBody;
-        Body.setAngle(piece, rand(-0.3, 0.3));
-        break;
-      case 'bar':
-      default:
-        piece = Bodies.rectangle(x, y, baseSize * 1.55, baseSize * 0.76, {
-          ...options,
-          chamfer: { radius: Math.max(4, baseSize * 0.12) }
-        }) as GamePieceBody;
-        Body.setAngle(piece, rand(-0.7, 0.7));
-        break;
-    }
-
-    piece.isGamePiece = true;
-    piece.isBomb = isBomb;
-    piece.isColorDestroyer = isColorDestroyer;
-    piece.isHuge = sizeMode === 'huge';
-    piece.colorName = color.name;
-    piece.colorValue = visualColorValue;
-    piece.markerType = markerType;
-    piece.shapeType = shape;
-    piece.overflowSince = null;
-    piece.pendingDestroy = false;
-    piece.isSelected = false;
-    piece.deformAmount = 0;
-    piece.deformAngle = 0;
-
-    Composite.add(this.getWorld(), piece);
-    return piece;
+    return createGamePiece({
+      world: this.getWorld(),
+      arena: this.arena,
+      difficulty,
+      hasActiveSpecialPiece,
+      forcedKind,
+      spawnAssist: this.getSpawnAssistState() ?? undefined,
+      position
+    });
   }
 
   private populateTurnBasedStart() {
@@ -972,31 +971,28 @@ export class GravitySmashGame {
         this.arena.width * columnFractions[columnIndex] +
         rand(-12, 12);
       const y = baseY - rowIndex * 68 + rand(-10, 10);
-      const piece = this.createPiece({ x, y });
+      const forcedKind =
+        index < this.currentDifficulty.guaranteedStartSpecials ? 'marker' : 'auto';
+      const piece = this.createPiece({ x, y }, forcedKind);
       Body.setVelocity(piece, { x: rand(-0.12, 0.12), y: 0 });
       Body.setAngularVelocity(piece, rand(-0.02, 0.02));
     }
   }
 
   private getTurnBasedSpawnCount() {
-    if (!this.currentDifficulty) {
-      return 0;
-    }
-
-    const min = this.currentDifficulty.turnSpawnMin;
-    const max = this.currentDifficulty.turnSpawnMax;
-    return Math.max(min, Math.round(rand(min, max + 0.999)));
+    return getTurnBasedSpawnCount(this.currentDifficulty);
   }
 
   private spawnTurnBasedPieces(count: number) {
     for (let index = 0; index < count; index += 1) {
-      this.createPiece();
+      const forcedKind = index === 0 ? this.consumeForcedSpawnKind() : 'auto';
+      this.createPiece(undefined, forcedKind);
     }
   }
 
   private scheduleTurnBasedOverflowCheck(consumesTurn: boolean) {
     this.turnBasedOverflowCheckAt =
-      performance.now() + GAME_CONFIG.turnBased.overflowSettleMs;
+      performance.now() + GAME_CONFIG.progression.turnBased.overflowSettleMs;
     this.turnBasedOverflowCheckConsumesTurn = consumesTurn;
   }
 
@@ -1006,12 +1002,15 @@ export class GravitySmashGame {
     }
 
     const consumesTurn = options?.consumeTurn !== false;
+    if (consumesTurn) {
+      this.turnBasedTurnsConsumed += 1;
+    }
     const freezeConsumesThisTurn = consumesTurn && this.freezeTurnsRemaining > 0;
     let spawnCount =
       consumesTurn && !freezeConsumesThisTurn ? this.getTurnBasedSpawnCount() : 0;
 
     if (!this.getPieces().length) {
-      spawnCount += GAME_CONFIG.turnBased.emptyBoardRefillCount;
+      spawnCount += GAME_CONFIG.progression.turnBased.emptyBoardRefillCount;
     }
 
     if (spawnCount > 0) {
@@ -1028,106 +1027,19 @@ export class GravitySmashGame {
   }
 
   private canPiecesResolveAsMove(a: GamePieceBody, b: GamePieceBody) {
-    if (a === b || a.pendingDestroy || b.pendingDestroy) {
-      return false;
-    }
-
-    if (a.isColorDestroyer || b.isColorDestroyer) {
-      return true;
-    }
-
-    if (a.isBomb || b.isBomb) {
-      return true;
-    }
-
-    const firstMarker = a.markerType ?? 'none';
-    const secondMarker = b.markerType ?? 'none';
-
-    if (firstMarker !== 'none' || secondMarker !== 'none') {
-      return firstMarker !== 'none' && firstMarker === secondMarker;
-    }
-
-    return !!a.colorName && a.colorName === b.colorName;
+    return canPiecesResolveAsMove(a, b);
   }
 
   private hasAvailableMoves() {
-    const pieces = this.getPieces().filter(piece => !piece.pendingDestroy);
-
-    for (let firstIndex = 0; firstIndex < pieces.length; firstIndex += 1) {
-      for (let secondIndex = firstIndex + 1; secondIndex < pieces.length; secondIndex += 1) {
-        if (this.canPiecesResolveAsMove(pieces[firstIndex], pieces[secondIndex])) {
-          return true;
-        }
-      }
-    }
-
-    return false;
-  }
-
-  private applyRandomColorToPiece(piece: GamePieceBody) {
-    const color = COLORS[Math.floor(Math.random() * COLORS.length)];
-    piece.colorName = color.name;
-    piece.colorValue = (piece.markerType ?? 'none') !== 'none' ? '#ffffff' : color.value;
-  }
-
-  private applyRandomMarkerToPiece(piece: GamePieceBody) {
-    piece.markerType =
-      INNER_MARKER_TYPES[Math.floor(Math.random() * INNER_MARKER_TYPES.length)];
-    piece.colorValue = '#ffffff';
+    return hasAvailableMoves(this.getPieces());
   }
 
   private ensureTurnBasedPlayableBoard() {
-    if (!this.isTurnBasedMode() || this.hasAvailableMoves()) {
+    if (!this.isTurnBasedMode()) {
       return;
     }
 
-    const recolorCandidates = this.getPieces().filter(
-      piece =>
-        !piece.pendingDestroy &&
-        !piece.isBomb &&
-        !piece.isColorDestroyer &&
-        (piece.markerType ?? 'none') === 'none'
-    );
-    const remarkCandidates = this.getPieces().filter(
-      piece =>
-        !piece.pendingDestroy &&
-        !piece.isBomb &&
-        !piece.isColorDestroyer &&
-        (piece.markerType ?? 'none') !== 'none'
-    );
-
-    if (recolorCandidates.length >= 2 || remarkCandidates.length >= 2) {
-      for (
-        let attempt = 0;
-        attempt < GAME_CONFIG.turnBased.reshuffleMaxAttempts && !this.hasAvailableMoves();
-        attempt += 1
-      ) {
-        recolorCandidates.forEach(piece => {
-          this.applyRandomColorToPiece(piece);
-        });
-
-        remarkCandidates.forEach(piece => {
-          this.applyRandomMarkerToPiece(piece);
-        });
-      }
-
-      if (!this.hasAvailableMoves() && recolorCandidates.length >= 2) {
-        const forcedColor = COLORS[Math.floor(Math.random() * COLORS.length)];
-        recolorCandidates[0].colorName = forcedColor.name;
-        recolorCandidates[0].colorValue = forcedColor.value;
-        recolorCandidates[1].colorName = forcedColor.name;
-        recolorCandidates[1].colorValue = forcedColor.value;
-      }
-
-      if (!this.hasAvailableMoves() && remarkCandidates.length >= 2) {
-        const forcedMarker =
-          INNER_MARKER_TYPES[Math.floor(Math.random() * INNER_MARKER_TYPES.length)];
-        remarkCandidates[0].markerType = forcedMarker;
-        remarkCandidates[0].colorValue = '#ffffff';
-        remarkCandidates[1].markerType = forcedMarker;
-        remarkCandidates[1].colorValue = '#ffffff';
-      }
-    }
+    ensureTurnBasedPlayableBoard(this.getPieces());
   }
 
   private spawnWave() {
@@ -1383,105 +1295,12 @@ export class GravitySmashGame {
     this.endRound('win');
   }
 
-  private isChainMatchCandidate(piece: GamePieceBody, targetColorName: string) {
-    return (
-      !piece.pendingDestroy &&
-      !piece.isBomb &&
-      !piece.isColorDestroyer &&
-      (piece.markerType ?? 'none') === 'none' &&
-      piece.colorName === targetColorName
-    );
-  }
-
-  private isMarkerChainMatchCandidate(piece: GamePieceBody, targetMarkerType: string) {
-    return (
-      !piece.pendingDestroy &&
-      !piece.isBomb &&
-      !piece.isColorDestroyer &&
-      (piece.markerType ?? 'none') === targetMarkerType
-    );
-  }
-
   private collectTouchingColorCluster(seedBodies: GamePieceBody[]) {
-    const targetColorName = seedBodies[0]?.colorName;
-    if (!targetColorName) {
-      return seedBodies;
-    }
-
-    const candidates = this.getPieces().filter(piece =>
-      this.isChainMatchCandidate(piece, targetColorName)
-    );
-    const cluster = new Set<GamePieceBody>();
-    const queue = seedBodies.filter(piece =>
-      this.isChainMatchCandidate(piece, targetColorName)
-    );
-
-    queue.forEach(piece => {
-      cluster.add(piece);
-    });
-
-    for (let index = 0; index < queue.length; index += 1) {
-      const currentPiece = queue[index];
-      const touchingPieces = Query.collides(currentPiece, candidates)
-        .map(result =>
-          result.bodyA === currentPiece
-            ? (result.bodyB as GamePieceBody)
-            : (result.bodyA as GamePieceBody)
-        )
-        .filter(piece => this.isChainMatchCandidate(piece, targetColorName));
-
-      touchingPieces.forEach(piece => {
-        if (cluster.has(piece)) {
-          return;
-        }
-
-        cluster.add(piece);
-        queue.push(piece);
-      });
-    }
-
-    return Array.from(cluster);
+    return collectTouchingColorCluster(this.getPieces(), seedBodies);
   }
 
   private collectTouchingMarkerCluster(seedBodies: GamePieceBody[]) {
-    const targetMarkerType = seedBodies[0]?.markerType ?? 'none';
-    if (targetMarkerType === 'none') {
-      return seedBodies;
-    }
-
-    const candidates = this.getPieces().filter(piece =>
-      this.isMarkerChainMatchCandidate(piece, targetMarkerType)
-    );
-    const cluster = new Set<GamePieceBody>();
-    const queue = seedBodies.filter(piece =>
-      this.isMarkerChainMatchCandidate(piece, targetMarkerType)
-    );
-
-    queue.forEach(piece => {
-      cluster.add(piece);
-    });
-
-    for (let index = 0; index < queue.length; index += 1) {
-      const currentPiece = queue[index];
-      const touchingPieces = Query.collides(currentPiece, candidates)
-        .map(result =>
-          result.bodyA === currentPiece
-            ? (result.bodyB as GamePieceBody)
-            : (result.bodyA as GamePieceBody)
-        )
-        .filter(piece => this.isMarkerChainMatchCandidate(piece, targetMarkerType));
-
-      touchingPieces.forEach(piece => {
-        if (cluster.has(piece)) {
-          return;
-        }
-
-        cluster.add(piece);
-        queue.push(piece);
-      });
-    }
-
-    return Array.from(cluster);
+    return collectTouchingMarkerCluster(this.getPieces(), seedBodies);
   }
 
   private destroyPieces(
@@ -1510,31 +1329,14 @@ export class GravitySmashGame {
       return;
     }
 
-    const bombRadius = Math.max(
-      GAME_CONFIG.bombs.minBlastRadius,
-      (bomb.bounds.max.x - bomb.bounds.min.x) * GAME_CONFIG.bombs.blastRadiusFactor
+    const { center, targets } = getBombDetonationResult(
+      this.getPieces(),
+      bomb,
+      triggerPiece,
+      this.getBombBlastMultiplier()
     );
 
-    const blastTargets = new Set<GamePieceBody>([bomb, triggerPiece]);
-
-    this.getPieces().forEach(piece => {
-      if (piece.pendingDestroy || piece === bomb || piece === triggerPiece) {
-        return;
-      }
-
-      const dx = piece.position.x - bomb.position.x;
-      const dy = piece.position.y - bomb.position.y;
-      const distance = Math.hypot(dx, dy);
-
-      if (distance <= bombRadius) {
-        blastTargets.add(piece);
-      }
-    });
-
-    this.destroyBodies(Array.from(blastTargets), {
-      x: bomb.position.x,
-      y: bomb.position.y
-    });
+    this.destroyBodies(targets, center);
   }
 
   private detonateDestroyerBombCombo(
@@ -1545,28 +1347,15 @@ export class GravitySmashGame {
       return;
     }
 
-    const comboCenter = {
-      x: (destroyer.position.x + bomb.position.x) * 0.5,
-      y: (destroyer.position.y + bomb.position.y) * 0.5
-    };
-
-    const comboRadius = Math.max(
-      GAME_CONFIG.combos.bombDestroyerMinBlastRadius,
-      Math.max(this.arena.width, this.arena.height) *
-        GAME_CONFIG.combos.bombDestroyerBlastRadiusFactor
+    const { center, targets } = getDestroyerBombComboResult(
+      this.getPieces(),
+      this.arena,
+      destroyer,
+      bomb,
+      this.getBombBlastMultiplier()
     );
 
-    const comboTargets = this.getPieces().filter(piece => {
-      if (piece.pendingDestroy) {
-        return false;
-      }
-
-      const dx = piece.position.x - comboCenter.x;
-      const dy = piece.position.y - comboCenter.y;
-      return Math.hypot(dx, dy) <= comboRadius;
-    });
-
-    this.destroyBodies(comboTargets, comboCenter);
+    this.destroyBodies(targets, center);
   }
 
   private destroyColorGroup(destroyer: GamePieceBody, targetPiece: GamePieceBody) {
@@ -1578,9 +1367,9 @@ export class GravitySmashGame {
       return;
     }
 
-    const targetColorName = targetPiece.colorName;
-    const targetBodies = this.getPieces().filter(
-      piece => !piece.pendingDestroy && piece.colorName === targetColorName
+    const targetBodies = getColorDestroyerSelectionTargets(
+      this.getPieces(),
+      targetPiece
     );
 
     this.destroyBodies([destroyer, ...targetBodies], {
@@ -1593,61 +1382,26 @@ export class GravitySmashGame {
     this.destroyBodies(this.getPieces(), effectCenter);
   }
 
-  private getRandomSpectrumTargetColor() {
-    const availableColors = Array.from(
-      new Set(
-        this.getPieces()
-          .filter(
-            piece =>
-              !piece.pendingDestroy &&
-              !piece.isBomb &&
-              !piece.isColorDestroyer &&
-              !!piece.colorName
-          )
-          .map(piece => piece.colorName as string)
-      )
-    );
-
-    if (!availableColors.length) {
-      return null;
-    }
-
-    return availableColors[Math.floor(Math.random() * availableColors.length)];
+  private getSpectrumTargetColor() {
+    return getSpectrumTargetColorFromPieces(this.getPieces());
   }
 
-  private destroyRandomColorGroup(targetColorName: string) {
-    const targetBodies = this.getPieces().filter(
-      piece =>
-        !piece.pendingDestroy &&
-        !piece.isBomb &&
-        !piece.isColorDestroyer &&
-        piece.colorName === targetColorName
-    );
+  private destroySpectrumColorGroup(targetColorName: string) {
+    const targetBodies = getSpectrumTargets(this.getPieces(), targetColorName);
 
     if (!targetBodies.length) {
       return false;
     }
 
-    const effectCenter = {
-      x:
-        targetBodies.reduce((sum, body) => sum + body.position.x, 0) /
-        targetBodies.length,
-      y:
-        targetBodies.reduce((sum, body) => sum + body.position.y, 0) /
-        targetBodies.length
-    };
+    const effectCenter = getBodiesCenter(targetBodies);
 
     this.spawnParticles(effectCenter.x, effectCenter.y, '#ffffff');
     this.destroyBodies(targetBodies, effectCenter);
     return true;
   }
 
-  private getBottomBodies() {
-    const floorY = this.arena.y + this.arena.height;
-    const burnThreshold = 8;
-    return this.getPieces().filter(
-      body => !body.pendingDestroy && body.bounds.max.y >= floorY - burnThreshold
-    );
+  private getBottomBodies(burnHeight = 8) {
+    return getBottomBodies(this.getPieces(), this.arena, burnHeight);
   }
 
   private burnBottomPieces(bottomBodies = this.getBottomBodies()) {
@@ -1736,6 +1490,10 @@ export class GravitySmashGame {
   }
 
   private checkOverflow(now: number) {
+    const overflowMs =
+      this.currentDifficulty?.overflowMs ??
+      GAME_CONFIG.round.arcadeOverflowByLevel[0].minValue;
+
     for (const body of this.getPieces()) {
       const touchingDangerLine =
         body.bounds.min.y <= this.arena.dangerLineY &&
@@ -1746,7 +1504,7 @@ export class GravitySmashGame {
           body.overflowSince = now;
         }
 
-        if (now - body.overflowSince >= GAME_CONFIG.round.overflowMs) {
+        if (now - body.overflowSince >= overflowMs) {
           this.endRound('lose');
           return;
         }
@@ -1835,11 +1593,9 @@ export class GravitySmashGame {
     this.clearFreezeTimer();
     this.clearFireTimer();
     this.clearSpectrumTimer();
-    this.lastRoundOutcome = mode;
-
-    if (mode === 'win') {
-      this.highestUnlockedLevel = Math.max(this.highestUnlockedLevel, this.currentLevel + 1);
-    }
+    this.pendingGuaranteedSpecialSpawns = 0;
+    this.turnBasedTurnsConsumed = 0;
+    markRoundEnded(this.progressState, this.currentLevel, mode);
 
     if (this.runner) {
       Runner.stop(this.runner);
@@ -1963,6 +1719,12 @@ export class GravitySmashGame {
       pauseButtonDisabled: false
     });
 
+    this.setUiState({
+      overlayPrimaryText: 'Перезапустить уровень',
+      overlaySecondaryText: 'Переиграть уровень',
+      pauseButtonText: 'Пауза'
+    });
+
     if (this.runner && this.engine) {
       Runner.run(this.runner, this.engine);
     }
@@ -2010,5 +1772,7 @@ export class GravitySmashGame {
     this.turnBasedOverflowCheckConsumesTurn = false;
     this.turnBasedOverflowWarningActive = false;
     this.suppressTurnBasedMoveConsumption = false;
+    this.pendingGuaranteedSpecialSpawns = 0;
+    this.turnBasedTurnsConsumed = 0;
   }
 }

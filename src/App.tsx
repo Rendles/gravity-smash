@@ -1,8 +1,18 @@
 ﻿import { useEffect, useRef, useState } from 'react';
 import { GameAudio } from './audio/GameAudio';
 import { GravitySmashGame } from './game/GravitySmashGame';
-import { GAME_CONFIG } from './game/config';
-import type { GameMode, GameProgressSnapshot } from './game/types';
+import { GAME_CONFIG, getAbilityCost } from './game/config';
+import {
+  createEmptyUpgradeLevels,
+  getFreezeArcadeDurationMultiplier,
+  getFreezeTurnDuration,
+  PlayerEconomy
+} from './game/economy';
+import type {
+  GameMode,
+  GameProgressSnapshot,
+  UpgradeId
+} from './game/types';
 import { createInitialUiState } from './game/ui';
 import { loadProgress, saveProgress } from './storage/progressStore';
 
@@ -15,6 +25,32 @@ function getInitialSoundEnabled() {
   } catch {
     return true;
   }
+}
+
+function getTurnWord(value: number) {
+  const mod10 = value % 10;
+  const mod100 = value % 100;
+
+  if (mod10 === 1 && mod100 !== 11) {
+    return 'ход';
+  }
+
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) {
+    return 'хода';
+  }
+
+  return 'ходов';
+}
+
+function createDefaultProgressSnapshot(): GameProgressSnapshot {
+  return {
+    resumeLevel: 1,
+    highestUnlockedLevel: 1,
+    economy: {
+      points: 0,
+      upgradeLevels: createEmptyUpgradeLevels()
+    }
+  };
 }
 
 export default function App() {
@@ -30,6 +66,7 @@ export default function App() {
   const [uiState, setUiState] = useState(createInitialUiState);
   const [savedProgress, setSavedProgress] = useState<GameProgressSnapshot | null>(null);
   const [progressReady, setProgressReady] = useState(false);
+  const [isMenuShopOpen, setIsMenuShopOpen] = useState(false);
 
   useEffect(() => {
     let isMounted = true;
@@ -81,6 +118,18 @@ export default function App() {
   useEffect(() => {
     audioRef.current?.setMenuMusicEnabled(!hasStarted);
   }, [hasStarted]);
+
+  const persistProgressSnapshot = (progress: GameProgressSnapshot) => {
+    pendingProgressSaveRef.current = progress;
+
+    if (progressSaveTimerRef.current !== null) {
+      window.clearTimeout(progressSaveTimerRef.current);
+      progressSaveTimerRef.current = null;
+    }
+
+    setSavedProgress(progress);
+    void saveProgress(progress);
+  };
 
   useEffect(() => {
     if (!hasStarted || !progressReady || !gameRootRef.current || !bottomBarRef.current) {
@@ -147,6 +196,70 @@ export default function App() {
     .join(' ');
 
   const soundToggleText = soundEnabled ? 'Звук: вкл' : 'Звук: выкл';
+  const baseMenuProgress = savedProgress ?? createDefaultProgressSnapshot();
+  const menuEconomy = new PlayerEconomy();
+  menuEconomy.hydrate(baseMenuProgress.economy);
+  const menuUpgradeCatalog = menuEconomy.getUpgradeCatalog();
+  const freezeCost = getAbilityCost(selectedMode, 'freeze');
+  const fireCost = getAbilityCost(selectedMode, 'fire');
+  const spectrumCost = getAbilityCost(selectedMode, 'spectrum');
+  const upgradeLevels =
+    gameRef.current?.getEconomySnapshot().upgradeLevels ??
+    savedProgress?.economy.upgradeLevels ??
+    createEmptyUpgradeLevels();
+  const freezeUpgradeLevel = upgradeLevels['freeze-duration'] ?? 0;
+  const freezeTurnCount = getFreezeTurnDuration(freezeUpgradeLevel);
+  const freezeArcadeSeconds =
+    (GAME_CONFIG.abilities.freezeDurationMs *
+      getFreezeArcadeDurationMultiplier(freezeUpgradeLevel)) /
+    1000;
+  const freezeArcadeSecondsText = Number.isInteger(freezeArcadeSeconds)
+    ? String(freezeArcadeSeconds)
+    : freezeArcadeSeconds.toFixed(1);
+  const freezeHint =
+    selectedMode === 'turn-based'
+      ? `Заморозка: следующие ${freezeTurnCount} ${getTurnWord(
+          freezeTurnCount
+        )} новые фигуры не падают`
+      : `Заморозка: останавливает спавн новых фигур на ${freezeArcadeSecondsText} сек.`;
+  const fireHint = 'Огонь: сжигает фигуры у дна стакана';
+  const spectrumHint = 'Спектр: уничтожает самый распространенный обычный цвет на поле';
+  const winUpgradeCatalog =
+    hasStarted && uiState.overlayCardWin
+      ? gameRef.current?.getUpgradeCatalog() ?? []
+      : [];
+
+  const handleStartMode = (mode: GameMode) => {
+    void audioRef.current?.resume();
+    setIsMenuShopOpen(false);
+    setSelectedMode(mode);
+    setHasStarted(true);
+  };
+
+  const handleMenuUpgradePurchase = (upgradeId: UpgradeId) => {
+    const nextEconomy = new PlayerEconomy();
+    nextEconomy.hydrate(baseMenuProgress.economy);
+
+    if (!nextEconomy.purchaseUpgrade(upgradeId)) {
+      return;
+    }
+
+    persistProgressSnapshot({
+      ...baseMenuProgress,
+      economy: nextEconomy.getSnapshot()
+    });
+  };
+
+  const handleReturnToMainMenu = () => {
+    const latestProgress = gameRef.current?.getProgressSnapshot() ?? savedProgress;
+    if (latestProgress) {
+      persistProgressSnapshot(latestProgress);
+    }
+
+    setIsMenuShopOpen(false);
+    setUiState(createInitialUiState());
+    setHasStarted(false);
+  };
 
   return (
     <div
@@ -204,6 +317,7 @@ export default function App() {
               className={`power-btn${uiState.freezeButtonActive ? ' power-btn-active' : ''}`}
               type="button"
               aria-label="Заморозка"
+              title={freezeHint}
               disabled={uiState.freezeButtonDisabled}
               onClick={() => gameRef.current?.useFreezePower()}
             >
@@ -211,7 +325,7 @@ export default function App() {
                 ❄
               </span>
             </button>
-            <div className="power-cost">{GAME_CONFIG.abilities.freezeCost} Coin</div>
+            <div className="power-cost">{freezeCost} Coin</div>
           </div>
 
           <div className="power-slot">
@@ -219,6 +333,7 @@ export default function App() {
               className={`power-btn${uiState.fireButtonActive ? ' power-btn-fire-active' : ''}`}
               type="button"
               aria-label="Огонь"
+              title={fireHint}
               disabled={uiState.fireButtonDisabled}
               onClick={() => gameRef.current?.useFirePower()}
             >
@@ -226,7 +341,7 @@ export default function App() {
                 <span className="fire-core" />
               </span>
             </button>
-            <div className="power-cost">{GAME_CONFIG.abilities.fireCost} Coin</div>
+            <div className="power-cost">{fireCost} Coin</div>
           </div>
 
           <div className="power-slot">
@@ -236,12 +351,13 @@ export default function App() {
               }`}
               type="button"
               aria-label="Многоцветный многоугольник"
+              title={spectrumHint}
               disabled={uiState.spectrumButtonDisabled}
               onClick={() => gameRef.current?.useSpectrumPower()}
             >
               <span className="power-icon power-icon-spectrum" aria-hidden="true" />
             </button>
-            <div className="power-cost">{GAME_CONFIG.abilities.spectrumCost} Coin</div>
+            <div className="power-cost">{spectrumCost} Coin</div>
           </div>
         </div>
       </div>
@@ -255,6 +371,46 @@ export default function App() {
             {uiState.overlayTitleText}
           </h1>
           <p id="overlay-message">{uiState.overlayMessageText}</p>
+          {uiState.overlayCardWin ? (
+            <div className="upgrade-shop">
+              <div className="upgrade-shop-header">
+                <span className="upgrade-shop-title">Магазин улучшений</span>
+                <span className="upgrade-shop-balance">
+                  {uiState.scoreCountText} Coin
+                </span>
+              </div>
+
+              <div className="upgrade-shop-list">
+                {winUpgradeCatalog.map(item => (
+                  <button
+                    key={item.id}
+                    className="upgrade-shop-card"
+                    type="button"
+                    disabled={!item.canPurchase}
+                    onClick={() => gameRef.current?.purchaseUpgrade(item.id)}
+                  >
+                    <div className="upgrade-shop-card-top">
+                      <span className="upgrade-shop-card-title">{item.name}</span>
+                      <span className="upgrade-shop-card-level">
+                        LVL {item.level}/{item.maxLevel}
+                      </span>
+                    </div>
+                    <div className="upgrade-shop-card-description">
+                      {item.description}
+                    </div>
+                    <div className="upgrade-shop-card-bonus">
+                      {item.currentBonusText}
+                    </div>
+                    <div className="upgrade-shop-card-cost">
+                      {item.isMaxLevel
+                        ? 'Максимальный уровень достигнут'
+                        : `Следующее улучшение: ${item.nextCost} Coin`}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
           <div className="overlay-actions">
             <button
               id="overlay-primary-btn"
@@ -272,6 +428,16 @@ export default function App() {
                 onClick={() => setSoundEnabled(current => !current)}
               >
                 {soundToggleText}
+              </button>
+            ) : null}
+            {uiState.overlayTitleTone === 'pause' &&
+            uiState.overlayPrimaryAction === 'resume' ? (
+              <button
+                className="action-btn secondary-btn"
+                type="button"
+                onClick={handleReturnToMainMenu}
+              >
+                В главное меню
               </button>
             ) : null}
             <button
@@ -314,11 +480,7 @@ export default function App() {
               type="button"
               className="menu-mode-card"
               disabled={!progressReady}
-              onClick={() => {
-                void audioRef.current?.resume();
-                setSelectedMode('arcade');
-                setHasStarted(true);
-              }}
+              onClick={() => handleStartMode('arcade')}
             >
               <span className="menu-mode-title">Режим на скорость</span>
               <span className="menu-mode-text">
@@ -331,11 +493,7 @@ export default function App() {
               className="menu-mode-card"
               disabled={!progressReady}
               aria-disabled={!progressReady}
-              onClick={() => {
-                void audioRef.current?.resume();
-                setSelectedMode('turn-based');
-                setHasStarted(true);
-              }}
+              onClick={() => handleStartMode('turn-based')}
             >
               <span className="menu-mode-title">Пошаговый режим</span>
               <span className="menu-mode-text">
@@ -345,6 +503,15 @@ export default function App() {
           </div>
 
           <div className="menu-actions">
+            <button
+              id="menu-shop-btn"
+              className="action-btn secondary-btn"
+              type="button"
+              disabled={!progressReady}
+              onClick={() => setIsMenuShopOpen(true)}
+            >
+              Магазин
+            </button>
             <button
               id="menu-sound-btn"
               className="action-btn secondary-btn"
@@ -358,6 +525,62 @@ export default function App() {
             </button>
           </div>
         </div>
+
+        {isMenuShopOpen ? (
+          <div className="menu-shop-modal" role="dialog" aria-modal="true">
+            <div className="menu-shop-backdrop" onClick={() => setIsMenuShopOpen(false)} />
+            <div className="menu-shop-panel">
+              <div className="upgrade-shop">
+                <div className="upgrade-shop-header">
+                  <span className="upgrade-shop-title">Магазин улучшений</span>
+                  <span className="upgrade-shop-balance">
+                    {baseMenuProgress.economy.points} Coin
+                  </span>
+                </div>
+
+                <div className="upgrade-shop-list">
+                  {menuUpgradeCatalog.map(item => (
+                    <button
+                      key={item.id}
+                      className="upgrade-shop-card"
+                      type="button"
+                      disabled={!item.canPurchase}
+                      onClick={() => handleMenuUpgradePurchase(item.id)}
+                    >
+                      <div className="upgrade-shop-card-top">
+                        <span className="upgrade-shop-card-title">{item.name}</span>
+                        <span className="upgrade-shop-card-level">
+                          LVL {item.level}/{item.maxLevel}
+                        </span>
+                      </div>
+                      <div className="upgrade-shop-card-description">
+                        {item.description}
+                      </div>
+                      <div className="upgrade-shop-card-bonus">
+                        {item.currentBonusText}
+                      </div>
+                      <div className="upgrade-shop-card-cost">
+                        {item.isMaxLevel
+                          ? 'Максимальный уровень достигнут'
+                          : `Следующее улучшение: ${item.nextCost} Coin`}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="menu-shop-actions">
+                <button
+                  type="button"
+                  className="action-btn secondary-btn"
+                  onClick={() => setIsMenuShopOpen(false)}
+                >
+                  Закрыть
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
       </div>
     </div>
   );

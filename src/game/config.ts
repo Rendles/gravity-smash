@@ -1,4 +1,34 @@
 ﻿import type { ColorDefinition, MarkerType, ShapeType } from './types';
+import type { GameMode } from './types';
+
+type AbilityId = 'freeze' | 'fire' | 'spectrum';
+
+type ChanceRange = {
+  minLevel: number;
+  maxLevel: number;
+  minChance: number;
+  maxChance: number;
+};
+
+type ValueRange = {
+  minLevel: number;
+  maxLevel: number;
+  minValue: number;
+  maxValue: number;
+};
+
+type TurnSpawnRange = {
+  minLevel: number;
+  maxLevel: number;
+  minSpawn: number;
+  maxSpawn: number;
+};
+
+type RewardBonusTier = {
+  minDestroyed: number;
+  maxDestroyed: number;
+  bonusPoints: number;
+};
 
 export const COLORS: ColorDefinition[] = [
   { name: 'red', value: '#ff0000' },
@@ -52,80 +82,120 @@ export const GAME_CONFIG = {
     baseGravityY: 1.92
   },
 
-  // Timed arcade mode progression.
+  // Level rhythm and progression pacing.
   progression: {
-    gravityPerLevel: 0.02,
-    timeScaleBase: 1,
-    timeScalePerLevel: 0.012,
-    levelGoalBase: 16,
-    levelGoalPerLevel: 4
-  },
-
-  // Turn-based mode progression.
-  turnBased: {
-    baseGravityScale: 0.88,
-    initialPiecesBase: 6,
-    initialPiecesGrowthEveryLevels: 3,
-    initialPiecesMax: 11,
-    normalGoalBase: 14,
-    normalGoalPerLevel: 3,
-    specialGoalStartLevel: 5,
-    specialGoalEveryLevels: 3,
-    specialGoalBase: 5,
-    specialGoalPerTier: 1,
-    turnSpawnBase: 4,
-    turnSpawnGrowthEveryLevels: 6,
-    turnSpawnBonusStartLevel: 4,
-    turnSpawnMax: 8,
-    emptyBoardRefillCount: 8,
-    specialGoalSpecialSpawnMultiplier: 1.85,
-    overflowSettleMs: 1500,
-    reshuffleMaxAttempts: 18
+    rhythm: {
+      breatherEveryLevels: 4,
+      tenseEveryLevels: 8,
+      breatherGoalMultiplier: 0.92,
+      breatherArcadeSpawnDelayMultiplier: 1.05,
+      breatherArcadeWaveMultiplier: 0.9,
+      breatherTurnSpawnOffset: -1,
+      tenseGoalMultiplier: 1.08,
+      tenseArcadeSpawnDelayMultiplier: 0.96,
+      tenseArcadeWaveMultiplier: 1.08,
+      tenseTurnSpawnOffset: 0
+    },
+    arcade: {
+      goalBase: 16,
+      goalPerLevel: 2,
+      goalBonusEveryLevels: 4,
+      goalBonusAmount: 1,
+      gravityGrowthEveryLevels: 5,
+      gravityGrowthMultiplier: 1.024,
+      timeScaleGrowthEveryLevels: 8,
+      timeScaleGrowthMultiplier: 1.01
+    },
+    turnBased: {
+      baseGravityScale: 0.88,
+      initialPiecesBase: 5,
+      initialPiecesGrowthEveryLevels: 3,
+      initialPiecesMax: 12,
+      normalGoalBase: 12,
+      normalGoalPerLevel: 2,
+      normalGoalBonusEveryLevels: 4,
+      normalGoalBonusAmount: 1,
+      specialGoalStartLevel: 5,
+      specialGoalEveryLevels: 3,
+      specialGoalBase: 4,
+      specialGoalPerTier: 1,
+      specialGoalSpecialSpawnMultiplier: 1.35,
+      specialGoalGuaranteedStartRatio: 0.4,
+      specialGoalGuaranteedEarlyRatio: 0.2,
+      specialGoalGuaranteedStartCap: 3,
+      specialGoalGuaranteedEarlyCap: 2,
+      specialGoalGuaranteedTurnWindow: 4,
+      turnSpawnByLevel: [
+        { minLevel: 1, maxLevel: 6, minSpawn: 1, maxSpawn: 1 },
+        { minLevel: 7, maxLevel: 14, minSpawn: 2, maxSpawn: 2 },
+        { minLevel: 15, maxLevel: 24, minSpawn: 2, maxSpawn: 3 },
+        { minLevel: 25, maxLevel: 999, minSpawn: 3, maxSpawn: 3 }
+      ] as readonly TurnSpawnRange[],
+      emptyBoardRefillCount: 8,
+      overflowSettleMs: 1500,
+      reshuffleMaxAttempts: 18
+    }
   },
 
   // Timed spawn behavior for the arcade mode.
   spawn: {
-    intervalMinMs: 820,
-    intervalMaxMs: 1180,
-    intervalMinStepPerLevel: 18,
-    intervalMaxStepPerLevel: 24,
-    intervalMinFloorMs: 180,
-    intervalMaxFloorMs: 260,
-    hugeChanceBase: 0.3,
-    hugeChancePerLevel: 0.008,
-    hugeChanceMax: 0.42,
+    arcadeIntervalMinMs: 920,
+    arcadeIntervalMaxMs: 1180,
+    arcadeTempoGrowthEveryLevels: 2,
+    arcadeIntervalMultiplierPerStep: 0.965,
+    arcadeIntervalMinFloorMs: 360,
+    arcadeIntervalMaxFloorMs: 520,
+    hugeChanceBase: 0.24,
+    hugeChanceGrowthEveryLevels: 6,
+    hugeChanceGrowthPerStep: 0.012,
+    hugeChanceMax: 0.34,
     doubleWaveChanceBase: 0.06,
-    doubleWaveChancePerLevel: 0.025,
-    doubleWaveChanceMax: 0.32,
-    tripleWaveStartLevel: 8,
-    tripleWaveChancePerLevel: 0.018,
-    tripleWaveChanceMax: 0.12,
-    guaranteedExtraWaveEveryLevels: 6,
-    maxWaveCount: 10,
+    doubleWaveChanceGrowthEveryLevels: 4,
+    doubleWaveChanceGrowthPerStep: 0.02,
+    doubleWaveChanceMax: 0.22,
+    tripleWaveStartLevel: 12,
+    tripleWaveChanceGrowthEveryLevels: 6,
+    tripleWaveChanceGrowthPerStep: 0.01,
+    tripleWaveChanceMax: 0.08,
+    guaranteedExtraWaveEveryLevels: 10,
+    maxWaveCount: 8,
     initialDelayMs: 260
   },
 
   // Bomb spawn and blast tuning.
   bombs: {
-    startLevel: 10,
-    chancePerLevel: 0.02,
-    maxChance: 0.1,
     blastRadiusFactor: 2.2,
-    minBlastRadius: 92
+    minBlastRadius: 92,
+    spawnChanceByLevel: [
+      { minLevel: 13, maxLevel: 16, minChance: 0.01, maxChance: 0.02 },
+      { minLevel: 17, maxLevel: 28, minChance: 0.02, maxChance: 0.04 }
+    ] as readonly ChanceRange[]
   },
 
   // Color destroyer spawn tuning.
   colorDestroyers: {
-    startLevel: 8,
-    chancePerLevel: 0.01,
-    maxChance: 0.08
+    spawnChanceByLevel: [
+      { minLevel: 9, maxLevel: 12, minChance: 0.02, maxChance: 0.03 },
+      { minLevel: 13, maxLevel: 16, minChance: 0.03, maxChance: 0.04 },
+      { minLevel: 17, maxLevel: 28, minChance: 0.04, maxChance: 0.05 }
+    ] as readonly ChanceRange[]
   },
 
-  // How much special piece frequency should slow down when the arcade tempo rises.
+  // Special piece throttling and subtle anti-frustration assistance.
   specials: {
-    tempoPenaltyPerStep: 0.45,
-    wavePenaltyPerExtraPiece: 0.28,
-    activeSpecialSpawnPenaltyMultiplier: 0.12
+    tempoPenaltyPerStep: 0.32,
+    wavePenaltyPerExtraPiece: 0.2,
+    activeSpecialSpawnPenaltyMultiplier: 0.12,
+    softAssist: {
+      warningDistanceFactor: 0.18,
+      criticalDistanceFactor: 0.08,
+      warningHugeChanceMultiplier: 0.84,
+      criticalHugeChanceMultiplier: 0.7,
+      warningBombChanceMultiplier: 1.15,
+      criticalBombChanceMultiplier: 1.3,
+      warningDestroyerChanceMultiplier: 1.12,
+      criticalDestroyerChanceMultiplier: 1.24
+    }
   },
 
   // Combo tuning between special pieces.
@@ -136,9 +206,12 @@ export const GAME_CONFIG = {
 
   // Marker figure introduction and scaling.
   markers: {
-    startLevel: 5,
-    chancePerLevel: 0.05,
-    maxChance: 0.36
+    spawnChanceByLevel: [
+      { minLevel: 5, maxLevel: 8, minChance: 0.05, maxChance: 0.07 },
+      { minLevel: 9, maxLevel: 12, minChance: 0.08, maxChance: 0.1 },
+      { minLevel: 13, maxLevel: 16, minChance: 0.1, maxChance: 0.12 },
+      { minLevel: 17, maxLevel: 28, minChance: 0.12, maxChance: 0.15 }
+    ] as readonly ChanceRange[]
   },
 
   // Destroy particles and flash effects.
@@ -147,26 +220,61 @@ export const GAME_CONFIG = {
     count: 14
   },
 
-  // Rewards for destroyed figures.
+  // Rewards for destroyed figures and large single-action clears.
   rewards: {
     normalFigurePoints: 2,
-    markedFigurePoints: 6
+    markedFigurePoints: 5,
+    actionBonuses: [
+      { minDestroyed: 3, maxDestroyed: 4, bonusPoints: 2 },
+      { minDestroyed: 5, maxDestroyed: 6, bonusPoints: 5 },
+      {
+        minDestroyed: 7,
+        maxDestroyed: Number.MAX_SAFE_INTEGER,
+        bonusPoints: 9
+      }
+    ] as readonly RewardBonusTier[]
   },
 
-  // Player abilities.
+  // Player abilities. Costs differ by mode, effects remain centralized here.
   abilities: {
-    freezeCost: 50,
+    costs: {
+      arcade: {
+        freeze: 50,
+        fire: 45,
+        spectrum: 35
+      },
+      'turn-based': {
+        freeze: 65,
+        fire: 45,
+        spectrum: 35
+      }
+    },
     freezeDurationMs: 3000,
-    freezeTurnDuration: 3,
-    fireCost: 40,
+    freezeTurnDuration: 2,
     fireDurationMs: 400,
-    spectrumCost: 50,
+    fireBaseBurnHeightPx: 8,
     spectrumDurationMs: 850
+  },
+
+  // Permanent upgrade formulas and caps.
+  upgrades: {
+    baseCost: 100,
+    costGrowthRate: 1.25,
+    maxLevel: 8,
+    blastRadiusBonusPerLevel: 0.04,
+    fireHeightBonusPerLevel: 0.04,
+    freezeArcadeDurationBonusPerLevel: 0.1,
+    freezeTurnExtraEveryLevels: 2,
+    freezeTurnMaxTurns: 5
   },
 
   // Round loss conditions.
   round: {
-    overflowMs: 1900
+    arcadeOverflowByLevel: [
+      { minLevel: 1, maxLevel: 8, minValue: 2500, maxValue: 2400 },
+      { minLevel: 9, maxLevel: 18, minValue: 2350, maxValue: 2250 },
+      { minLevel: 19, maxLevel: 32, minValue: 2200, maxValue: 2050 }
+    ] as readonly ValueRange[]
   },
 
   // Misc future balance hooks.
@@ -174,3 +282,7 @@ export const GAME_CONFIG = {
     baseImpulse: 0.0051
   }
 } as const;
+
+export function getAbilityCost(mode: GameMode, abilityId: AbilityId) {
+  return GAME_CONFIG.abilities.costs[mode][abilityId];
+}
