@@ -1,4 +1,5 @@
 import { INITIAL_LEVEL } from '../game/config';
+import { normalizeUpgradeLevels } from '../game/economy';
 import type { GameProgressSnapshot } from '../game/types';
 
 const DB_NAME = 'gravity-smash';
@@ -31,9 +32,23 @@ function normalizeProgress(
     typeof progress.economy?.points === 'number' && progress.economy.points > 0
       ? Math.floor(progress.economy.points)
       : 0;
-  const purchasedUpgrades = Array.isArray(progress.economy?.purchasedUpgrades)
-    ? progress.economy.purchasedUpgrades
-    : [];
+  const rawEconomy =
+    progress.economy && typeof progress.economy === 'object'
+      ? progress.economy
+      : undefined;
+  const upgradeLevels = normalizeUpgradeLevels(
+    rawEconomy && 'upgradeLevels' in rawEconomy
+      ? (rawEconomy.upgradeLevels as Parameters<typeof normalizeUpgradeLevels>[0])
+      : null
+  );
+  const legacyPurchasedUpgrades =
+    rawEconomy && Array.isArray((rawEconomy as { purchasedUpgrades?: unknown }).purchasedUpgrades)
+      ? ((rawEconomy as unknown) as { purchasedUpgrades: string[] }).purchasedUpgrades
+      : [];
+
+  if (legacyPurchasedUpgrades.includes('blast-radius')) {
+    upgradeLevels['blast-radius'] = Math.max(1, upgradeLevels['blast-radius']);
+  }
 
   return {
     version: DB_VERSION,
@@ -45,7 +60,7 @@ function normalizeProgress(
     highestUnlockedLevel,
     economy: {
       points,
-      purchasedUpgrades
+      upgradeLevels
     }
   };
 }

@@ -56,6 +56,10 @@ export interface LevelSettings {
   initialPieces: number;
   turnSpawnMin: number;
   turnSpawnMax: number;
+  overflowMs: number;
+  guaranteedStartSpecials: number;
+  guaranteedEarlySpecialSpawns: number;
+  guaranteedEarlySpecialTurns: number;
 }
 
 export interface Particle {
@@ -86,19 +90,30 @@ export type GameAudioEvent =
   | { type: 'round'; result: 'win' | 'lose' };
 export type UpgradeId =
   | 'blast-radius'
-  | 'color-destroyer-efficiency'
-  | 'special-figure-frequency';
+  | 'fire-height'
+  | 'freeze-duration';
+export type UpgradeLevelsSnapshot = Record<UpgradeId, number>;
 
 export interface UpgradeDefinition {
   id: UpgradeId;
   name: string;
   description: string;
-  cost: number;
+  baseCost: number;
+  costGrowthRate: number;
+  maxLevel: number;
+}
+
+export interface UpgradeShopItem extends UpgradeDefinition {
+  level: number;
+  nextCost: number | null;
+  currentBonusText: string;
+  canPurchase: boolean;
+  isMaxLevel: boolean;
 }
 
 export interface EconomySnapshot {
   points: number;
-  purchasedUpgrades: UpgradeId[];
+  upgradeLevels: UpgradeLevelsSnapshot;
 }
 
 export interface GameProgressSnapshot {
