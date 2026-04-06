@@ -26,6 +26,21 @@ export class PlayerEconomy {
   private points = 0;
   private readonly purchasedUpgrades = new Set<UpgradeId>();
 
+  hydrate(snapshot?: EconomySnapshot | null) {
+    this.points =
+      snapshot && Number.isFinite(snapshot.points) && snapshot.points > 0
+        ? Math.floor(snapshot.points)
+        : 0;
+
+    this.purchasedUpgrades.clear();
+
+    snapshot?.purchasedUpgrades.forEach(upgradeId => {
+      if (UPGRADE_DEFINITIONS.some(definition => definition.id === upgradeId)) {
+        this.purchasedUpgrades.add(upgradeId);
+      }
+    });
+  }
+
   awardForDestroyedBodies(bodies: GamePieceBody[]) {
     let earnedPoints = 0;
 

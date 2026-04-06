@@ -101,6 +101,12 @@ export interface EconomySnapshot {
   purchasedUpgrades: UpgradeId[];
 }
 
+export interface GameProgressSnapshot {
+  resumeLevel: number;
+  highestUnlockedLevel: number;
+  economy: EconomySnapshot;
+}
+
 export interface GameUiState {
   progressLabelText: string;
   progressCountText: string;
@@ -136,6 +142,8 @@ export interface GameControllerOptions {
   onUiChange: (state: GameUiState) => void;
   onAudioEvent?: (event: GameAudioEvent) => void;
   mode?: GameMode;
+  initialProgress?: GameProgressSnapshot | null;
+  onProgressChange?: (progress: GameProgressSnapshot) => void;
 }
 
 export interface GamePieceBody extends Body {

@@ -1,4 +1,4 @@
-﻿import {
+import {
   Bodies,
   Body,
   Composite,
@@ -334,6 +334,7 @@ export class GravitySmashGame {
 
     this.startFreezeEffect(GAME_CONFIG.abilities.freezeDurationMs);
     this.onAudioEvent?.({ type: 'ability', ability: 'freeze' });
+    this.emitProgressChange();
     this.updateHud();
     return true;
   }
@@ -363,6 +364,7 @@ export class GravitySmashGame {
 
     this.startFireEffect(GAME_CONFIG.abilities.fireDurationMs);
     this.onAudioEvent?.({ type: 'ability', ability: 'fire' });
+    this.emitProgressChange();
     this.updateHud();
     return true;
   }
