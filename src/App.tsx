@@ -2,6 +2,7 @@
 import { GameAudio } from './audio/GameAudio';
 import { GravitySmashGame } from './game/GravitySmashGame';
 import { GAME_CONFIG } from './game/config';
+import type { GameMode } from './game/types';
 import { createInitialUiState } from './game/ui';
 
 const SOUND_STORAGE_KEY = 'gravity-smash-sound-enabled';
@@ -21,6 +22,7 @@ export default function App() {
   const gameRef = useRef<GravitySmashGame | null>(null);
   const audioRef = useRef<GameAudio | null>(null);
   const [hasStarted, setHasStarted] = useState(false);
+  const [selectedMode, setSelectedMode] = useState<GameMode>('arcade');
   const [soundEnabled, setSoundEnabled] = useState(getInitialSoundEnabled);
   const [uiState, setUiState] = useState(createInitialUiState);
 
@@ -58,6 +60,7 @@ export default function App() {
     const game = new GravitySmashGame({
       root: gameRootRef.current,
       bottomBar: bottomBarRef.current,
+      mode: selectedMode,
       onUiChange: setUiState,
       onAudioEvent: event => {
         audioRef.current?.playEvent(event);
@@ -71,7 +74,7 @@ export default function App() {
       game.destroy();
       gameRef.current = null;
     };
-  }, [hasStarted]);
+  }, [hasStarted, selectedMode]);
 
   const appClassName = [
     uiState.freezeButtonActive ? 'freeze-active' : '',
@@ -103,7 +106,7 @@ export default function App() {
         </div>
 
         <div className="top-chip top-chip-progress">
-          <div className="top-chip-label">DESTROYED</div>
+          <div className="top-chip-label">{uiState.progressLabelText}</div>
           <div id="progress-count" className="top-chip-value">
             {uiState.progressCountText}
           </div>
@@ -226,39 +229,57 @@ export default function App() {
         <div className="menu-backdrop" />
         <div className="menu-card">
           <div className="menu-eyebrow">Gravity Smash</div>
-          <h1>Режим уровней</h1>
+          <h1>Выбери режим</h1>
           <div className="menu-copy">
             <p>
-              Уничтожай фигуры, находя правильные пары, удерживай стакан под
-              контролем и проходи уровни все дальше.
+              Можно играть в быстрый аркадный режим, где нужно держать темп и
+              успевать разбирать стакан, или выбрать новый спокойный пошаговый
+              режим, где важнее тактика и планирование.
             </p>
             <p>
-              Во время игры можно использовать способности: заморозку, огонь и
-              случайное уничтожение цвета. Они стоят монеты и помогают
-              выбираться из сложных ситуаций.
-            </p>
-            <p>
-              На более высоких уровнях тебя будут ждать новые модификаторы и
-              дополнительные усложнения, так что игра постепенно станет заметно
-              насыщеннее.
+              В обоих режимах доступны способности, монеты и специальные фигуры,
+              но ощущаются они по-разному: один режим про давление, второй про
+              вдумчивые решения.
             </p>
             <p className="menu-note">
-              Это тестовая версия игры. В будущем она будет дорабатываться, и
-              твое мнение о ней для меня очень важно.
+              Это тестовая версия игры. В будущем оба режима будут дорабатываться,
+              и твое мнение о них для меня очень важно.
             </p>
           </div>
-          <div className="menu-actions">
+
+          <div className="menu-mode-grid">
             <button
-              id="menu-start-btn"
-              className="action-btn"
               type="button"
+              className="menu-mode-card"
               onClick={() => {
                 void audioRef.current?.resume();
+                setSelectedMode('arcade');
                 setHasStarted(true);
               }}
             >
-              Играть
+              <span className="menu-mode-title">Режим на скорость</span>
+              <span className="menu-mode-text">
+                Фигуры падают постоянно, сложность растет за счет темпа и частоты волн.
+              </span>
             </button>
+
+            <button
+              type="button"
+              className="menu-mode-card"
+              onClick={() => {
+                void audioRef.current?.resume();
+                setSelectedMode('turn-based');
+                setHasStarted(true);
+              }}
+            >
+              <span className="menu-mode-title">Пошаговый режим</span>
+              <span className="menu-mode-text">
+                После каждого действия падают новые фигуры, и можно спокойно думать над каждым ходом.
+              </span>
+            </button>
+          </div>
+
+          <div className="menu-actions">
             <button
               id="menu-sound-btn"
               className="action-btn secondary-btn"

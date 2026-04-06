@@ -1,5 +1,5 @@
-import { GAME_CONFIG } from './config';
-import type { LevelSettings } from './types';
+﻿import { GAME_CONFIG } from './config';
+import type { GameMode, LevelGoalType, LevelSettings } from './types';
 
 export function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
@@ -9,7 +9,16 @@ export function rand(min: number, max: number) {
   return min + Math.random() * (max - min);
 }
 
-export function getLevelSettings(level: number): LevelSettings {
+function getSpecialGoalType(level: number): LevelGoalType {
+  return level >= GAME_CONFIG.turnBased.specialGoalStartLevel &&
+    (level - GAME_CONFIG.turnBased.specialGoalStartLevel) %
+      GAME_CONFIG.turnBased.specialGoalEveryLevels ===
+      0
+    ? 'special'
+    : 'normal';
+}
+
+function getArcadeLevelSettings(level: number): LevelSettings {
   const levelIndex = Math.max(0, level - 1);
   const baseAverageSpawnInterval =
     (GAME_CONFIG.spawn.intervalMinMs + GAME_CONFIG.spawn.intervalMaxMs) * 0.5;
@@ -110,8 +119,10 @@ export function getLevelSettings(level: number): LevelSettings {
     levelIndex * GAME_CONFIG.progression.levelGoalPerLevel;
 
   return {
+    mode: 'arcade',
     level,
     goal,
+    goalType: 'all',
     gravityY,
     timeScale,
     spawnMin,
@@ -124,6 +135,87 @@ export function getLevelSettings(level: number): LevelSettings {
     tripleSpawnChance,
     guaranteedExtraSpawns,
     baseWavePieces: 1 + guaranteedExtraSpawns,
-    speedMultiplier: (gravityY / GAME_CONFIG.physics.baseGravityY) * timeScale
+    speedMultiplier: (gravityY / GAME_CONFIG.physics.baseGravityY) * timeScale,
+    initialPieces: 0,
+    turnSpawnMin: 0,
+    turnSpawnMax: 0
   };
+}
+
+function getTurnBasedLevelSettings(level: number): LevelSettings {
+  const levelIndex = Math.max(0, level - 1);
+  const baseArcadeSettings = getArcadeLevelSettings(level);
+  const goalType = getSpecialGoalType(level);
+  const specialSpawnMultiplier =
+    goalType === 'special'
+      ? GAME_CONFIG.turnBased.specialGoalSpecialSpawnMultiplier
+      : 1;
+  const specialTier = Math.floor(
+    Math.max(0, level - GAME_CONFIG.turnBased.specialGoalStartLevel) /
+      GAME_CONFIG.turnBased.specialGoalEveryLevels
+  );
+  const goal =
+    goalType === 'special'
+      ? GAME_CONFIG.turnBased.specialGoalBase +
+        specialTier * GAME_CONFIG.turnBased.specialGoalPerTier
+      : GAME_CONFIG.turnBased.normalGoalBase +
+        levelIndex * GAME_CONFIG.turnBased.normalGoalPerLevel;
+  const initialPieces = clamp(
+    GAME_CONFIG.turnBased.initialPiecesBase +
+      Math.floor(levelIndex / GAME_CONFIG.turnBased.initialPiecesGrowthEveryLevels),
+    GAME_CONFIG.turnBased.initialPiecesBase,
+    GAME_CONFIG.turnBased.initialPiecesMax
+  );
+  const turnSpawnMin = clamp(
+    GAME_CONFIG.turnBased.turnSpawnBase +
+      Math.floor(levelIndex / GAME_CONFIG.turnBased.turnSpawnGrowthEveryLevels),
+    GAME_CONFIG.turnBased.turnSpawnBase,
+    GAME_CONFIG.turnBased.turnSpawnMax
+  );
+  const turnSpawnMax = clamp(
+    turnSpawnMin +
+      (level >= GAME_CONFIG.turnBased.turnSpawnBonusStartLevel ? 1 : 0),
+    turnSpawnMin,
+    GAME_CONFIG.turnBased.turnSpawnMax
+  );
+
+  return {
+    ...baseArcadeSettings,
+    mode: 'turn-based',
+    goal,
+    goalType,
+    gravityY: GAME_CONFIG.physics.baseGravityY * GAME_CONFIG.turnBased.baseGravityScale,
+    timeScale: 1,
+    spawnMin: 0,
+    spawnMax: 0,
+    doubleSpawnChance: 0,
+    tripleSpawnChance: 0,
+    guaranteedExtraSpawns: 0,
+    baseWavePieces: 0,
+    speedMultiplier: 1,
+    bombChance: clamp(
+      baseArcadeSettings.bombChance * specialSpawnMultiplier,
+      0,
+      GAME_CONFIG.bombs.maxChance
+    ),
+    colorDestroyerChance: clamp(
+      baseArcadeSettings.colorDestroyerChance * specialSpawnMultiplier,
+      0,
+      GAME_CONFIG.colorDestroyers.maxChance
+    ),
+    markedChance: clamp(
+      baseArcadeSettings.markedChance * specialSpawnMultiplier,
+      0,
+      GAME_CONFIG.markers.maxChance
+    ),
+    initialPieces,
+    turnSpawnMin,
+    turnSpawnMax
+  };
+}
+
+export function getLevelSettings(level: number, mode: GameMode = 'arcade'): LevelSettings {
+  return mode === 'turn-based'
+    ? getTurnBasedLevelSettings(level)
+    : getArcadeLevelSettings(level);
 }
