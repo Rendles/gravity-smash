@@ -44,6 +44,7 @@ import {
 import {
   drawArena,
   drawBlastWaves,
+  drawComboPopups,
   drawGlowBody,
   drawParticles,
   handlePlasticCollisions,
@@ -67,6 +68,7 @@ import {
 } from './ui';
 import {
   getBombBlastRadiusMultiplier,
+  getActionBonusPoints,
   getFireHeightBonusFactor,
   getFreezeArcadeDurationMultiplier,
   getFreezeTurnDuration as getFreezeTurnDurationValue,
@@ -76,6 +78,7 @@ import type {
   GameAudioEvent,
   Arena,
   BlastWave,
+  ComboPopup,
   EconomySnapshot,
   GameMode,
   GameControllerOptions,
@@ -169,6 +172,7 @@ export class GravitySmashGame {
   private spectrumEndsAt: number | null = null;
   private particles: Particle[] = [];
   private blastWaves: BlastWave[] = [];
+  private comboPopups: ComboPopup[] = [];
   private roundEnded = false;
   private isPaused = false;
   private isResumeCountdownActive = false;
@@ -236,13 +240,18 @@ export class GravitySmashGame {
     }
 
     const ctx = this.render.context;
+    const isDangerActive = this.getPieces().some(body =>
+      this.isPieceInDangerState(body)
+    );
     drawArena(ctx, this.arena, {
       isFrozen: this.isFreezeActive(),
-      fireHeatProgress: this.getFireHeatProgress()
+      fireHeatProgress: this.getFireHeatProgress(),
+      isDangerActive
     });
-    this.getPieces().forEach(body => drawGlowBody(ctx, body));
+    this.getPieces().forEach(body => drawGlowBody(ctx, body, this.arena));
     drawBlastWaves(ctx, this.blastWaves);
     drawParticles(ctx, this.particles);
+    drawComboPopups(ctx, this.comboPopups);
   };
 
   constructor(options: GameControllerOptions) {
@@ -281,6 +290,7 @@ export class GravitySmashGame {
     this.turnBasedTurnsConsumed = 0;
     this.particles = [];
     this.blastWaves = [];
+    this.comboPopups = [];
     this.currentDifficulty = null;
     this.selectedPiece = null;
 
@@ -342,6 +352,7 @@ export class GravitySmashGame {
     if (this.isTurnBasedMode()) {
       this.populateTurnBasedStart();
       this.ensureTurnBasedPlayableBoard();
+      this.refillTurnBasedDeadlockIfNeeded();
       this.scheduleTurnBasedOverflowCheck(false);
     } else {
       this.scheduleSpawnAfterDelay(GAME_CONFIG.spawn.initialDelayMs);
@@ -484,6 +495,10 @@ export class GravitySmashGame {
     );
   }
 
+  getCurrentLevel() {
+    return this.currentLevel;
+  }
+
   getUpgradeCatalog() {
     return this.economy.getUpgradeCatalog();
   }
@@ -562,6 +577,15 @@ export class GravitySmashGame {
 
   private isGoalReached() {
     return this.getDisplayedDestroyedCount() >= this.levelGoal;
+  }
+
+  private isPieceInDangerState(body: GamePieceBody) {
+    return (
+      !body.pendingDestroy &&
+      body.bounds.min.y <= this.arena.dangerLineY &&
+      body.overflowSince !== null &&
+      body.overflowSince !== undefined
+    );
   }
 
   private isFreezeActive() {
@@ -1022,6 +1046,7 @@ export class GravitySmashGame {
     }
 
     this.ensureTurnBasedPlayableBoard();
+    this.refillTurnBasedDeadlockIfNeeded();
     this.scheduleTurnBasedOverflowCheck(consumesTurn);
     this.updateHud();
   }
@@ -1040,6 +1065,22 @@ export class GravitySmashGame {
     }
 
     ensureTurnBasedPlayableBoard(this.getPieces());
+  }
+
+  private refillTurnBasedDeadlockIfNeeded() {
+    if (
+      !this.isTurnBasedMode() ||
+      this.roundEnded ||
+      !this.getPieces().length ||
+      this.hasAvailableMoves()
+    ) {
+      return;
+    }
+
+    this.spawnTurnBasedPieces(
+      GAME_CONFIG.progression.turnBased.deadlockRefillCount
+    );
+    this.ensureTurnBasedPlayableBoard();
   }
 
   private spawnWave() {
@@ -1140,6 +1181,29 @@ export class GravitySmashGame {
       radius: 10,
       life: 240,
       maxLife: 240
+    });
+  }
+
+  private createComboPopup(
+    center: { x: number; y: number },
+    destroyedCount: number,
+    bonusPoints: number
+  ) {
+    this.comboPopups.push({
+      x: center.x,
+      y: center.y,
+      life: 900,
+      maxLife: 900,
+      destroyedCount,
+      bonusPoints
+    });
+
+    this.blastWaves.push({
+      x: center.x,
+      y: center.y,
+      radius: 18,
+      life: 360,
+      maxLife: 360
     });
   }
 
@@ -1454,6 +1518,7 @@ export class GravitySmashGame {
       Composite.remove(this.getWorld(), body);
     });
 
+    const bonusPoints = getActionBonusPoints(uniqueBodies.length);
     this.economy.awardForDestroyedBodies(uniqueBodies);
     const normalDestroyed = uniqueBodies.filter(body => this.isNormalGoalPiece(body)).length;
     const specialDestroyed = uniqueBodies.filter(body => this.isSpecialGoalPiece(body)).length;
@@ -1469,6 +1534,9 @@ export class GravitySmashGame {
 
     this.spawnParticles(center.x, center.y, '#ffffff');
     this.createBlastWave(center.x, center.y);
+    if (bonusPoints > 0) {
+      this.createComboPopup(center, uniqueBodies.length, bonusPoints);
+    }
 
     this.levelDestroyed += uniqueBodies.length;
     this.levelNormalDestroyed += normalDestroyed;
@@ -1549,6 +1617,11 @@ export class GravitySmashGame {
       wave.radius += 12 * (delta / 16.666);
       return wave.life > 0;
     });
+
+    this.comboPopups = this.comboPopups.filter(popup => {
+      popup.life -= delta;
+      return popup.life > 0;
+    });
   }
 
   private showOverlay(mode: 'win' | 'lose') {
@@ -1595,6 +1668,7 @@ export class GravitySmashGame {
     this.clearSpectrumTimer();
     this.pendingGuaranteedSpecialSpawns = 0;
     this.turnBasedTurnsConsumed = 0;
+    this.comboPopups = [];
     markRoundEnded(this.progressState, this.currentLevel, mode);
 
     if (this.runner) {

@@ -745,6 +745,62 @@ canvas {
   box-shadow: 0 0 28px rgba(55, 239, 141, 0.22);
 }
 
+#tutorial-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 24;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(3, 5, 10, 0.76);
+  backdrop-filter: blur(8px);
+}
+
+.tutorial-card {
+  width: min(92vw, 410px);
+  padding: 24px;
+  border-radius: 24px;
+  text-align: center;
+  background: linear-gradient(180deg, rgba(10, 14, 24, 0.98) 0%, rgba(7, 10, 18, 0.96) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow:
+    0 24px 60px rgba(0, 0, 0, 0.42),
+    0 0 36px rgba(0, 240, 255, 0.1),
+    inset 0 0 24px rgba(255, 255, 255, 0.03);
+  animation: tutorial-card-in 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.tutorial-eyebrow {
+  margin-bottom: 10px;
+  color: #8feaff;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.tutorial-card h2 {
+  margin: 0 0 10px;
+  font-size: 30px;
+  line-height: 1.05;
+  text-shadow: 0 0 20px rgba(255, 255, 255, 0.14);
+}
+
+.tutorial-card p {
+  margin: 0 0 18px;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+.tutorial-card .action-btn {
+  min-width: 150px;
+  justify-content: center;
+  background: linear-gradient(180deg, #37ef8d 0%, #1fb76b 100%);
+  box-shadow: 0 0 28px rgba(55, 239, 141, 0.22);
+}
+
 #main-menu {
   position: absolute;
   inset: 0;
@@ -986,6 +1042,18 @@ canvas {
   }
 }
 
+@keyframes tutorial-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(18px) scale(0.96);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
 @media (max-width: 720px) {
   #top-status {
     top: max(8px, env(safe-area-inset-top));
@@ -1077,5 +1145,13 @@ canvas {
   .menu-shop-panel {
     padding: 18px 14px 16px;
     border-radius: 20px;
+  }
+
+  .tutorial-card {
+    padding: 22px 18px;
+  }
+
+  .tutorial-card h2 {
+    font-size: 26px;
   }
 }

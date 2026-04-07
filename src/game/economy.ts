@@ -123,7 +123,7 @@ function clampNumber(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
 
-function getActionBonusPoints(destroyedCount: number) {
+export function getActionBonusPoints(destroyedCount: number) {
   return (
     GAME_CONFIG.rewards.actionBonuses.find(
       tier =>

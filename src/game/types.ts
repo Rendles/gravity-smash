@@ -81,6 +81,15 @@ export interface BlastWave {
   maxLife: number;
 }
 
+export interface ComboPopup {
+  x: number;
+  y: number;
+  life: number;
+  maxLife: number;
+  destroyedCount: number;
+  bonusPoints: number;
+}
+
 export type OverlayTitleTone = 'win' | 'lose' | 'pause';
 export type OverlayPrimaryAction = 'next' | 'retry' | 'resume';
 export type AbilityAudioCue = 'freeze' | 'fire' | 'spectrum';
