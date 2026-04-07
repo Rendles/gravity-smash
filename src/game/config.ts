@@ -132,6 +132,7 @@ export const GAME_CONFIG = {
         { minLevel: 25, maxLevel: 999, minSpawn: 3, maxSpawn: 3 }
       ] as readonly TurnSpawnRange[],
       emptyBoardRefillCount: 8,
+      deadlockRefillCount: 8,
       overflowSettleMs: 1500,
       reshuffleMaxAttempts: 18
     }

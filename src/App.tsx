@@ -17,6 +17,42 @@ import { createInitialUiState } from './game/ui';
 import { loadProgress, saveProgress } from './storage/progressStore';
 
 const SOUND_STORAGE_KEY = 'gravity-smash-sound-enabled';
+const TUTORIAL_STORAGE_KEY = 'gravity-smash-tutorials-seen';
+
+type TutorialId = 'abilities' | 'markers' | 'color-destroyer' | 'bomb';
+
+interface TutorialCard {
+  id: TutorialId;
+  title: string;
+  message: string;
+}
+
+const TUTORIALS: Record<TutorialId, TutorialCard> = {
+  abilities: {
+    id: 'abilities',
+    title: 'Способности',
+    message:
+      'Трать Coin на помощь: заморозка задерживает спавн, огонь чистит дно, спектр убирает самый частый цвет.'
+  },
+  markers: {
+    id: 'markers',
+    title: 'Новая механика',
+    message:
+      'С этого уровня появляются белые символы. Матчь одинаковые A, M, T или +, цвет не важен.'
+  },
+  'color-destroyer': {
+    id: 'color-destroyer',
+    title: 'Новая механика',
+    message:
+      'Появляется уничтожитель цвета. Выбери его и фигуру, чтобы убрать весь выбранный цвет или символ.'
+  },
+  bomb: {
+    id: 'bomb',
+    title: 'Новая механика',
+    message:
+      'Появляются бомбы. Совмести бомбу с любой фигурой, чтобы взорвать соседей.'
+  }
+};
 
 function getInitialSoundEnabled() {
   try {
@@ -24,6 +60,27 @@ function getInitialSoundEnabled() {
     return storedValue === null ? true : storedValue === 'true';
   } catch {
     return true;
+  }
+}
+
+function getInitialSeenTutorialIds(): TutorialId[] {
+  try {
+    const storedValue = window.localStorage.getItem(TUTORIAL_STORAGE_KEY);
+    const parsedValue = storedValue ? JSON.parse(storedValue) : [];
+
+    return Array.isArray(parsedValue)
+      ? parsedValue.filter((id): id is TutorialId => id in TUTORIALS)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveSeenTutorialIds(ids: TutorialId[]) {
+  try {
+    window.localStorage.setItem(TUTORIAL_STORAGE_KEY, JSON.stringify(ids));
+  } catch {
+    // Tutorial hints are helpful, but the game should keep working without storage.
   }
 }
 
@@ -53,6 +110,42 @@ function createDefaultProgressSnapshot(): GameProgressSnapshot {
   };
 }
 
+function getUnlockTutorialForLevel(level: number): TutorialId | null {
+  const markerUnlockLevel = GAME_CONFIG.markers.spawnChanceByLevel[0]?.minLevel;
+  const colorDestroyerUnlockLevel =
+    GAME_CONFIG.colorDestroyers.spawnChanceByLevel[0]?.minLevel;
+  const bombUnlockLevel = GAME_CONFIG.bombs.spawnChanceByLevel[0]?.minLevel;
+
+  if (level === markerUnlockLevel) {
+    return 'markers';
+  }
+
+  if (level === colorDestroyerUnlockLevel) {
+    return 'color-destroyer';
+  }
+
+  if (level === bombUnlockLevel) {
+    return 'bomb';
+  }
+
+  return null;
+}
+
+function getTutorialsForLevelStart(level: number, includeAbilityIntro: boolean) {
+  const tutorialIds: TutorialId[] = [];
+  const unlockTutorial = getUnlockTutorialForLevel(level);
+
+  if (includeAbilityIntro) {
+    tutorialIds.push('abilities');
+  }
+
+  if (unlockTutorial) {
+    tutorialIds.push(unlockTutorial);
+  }
+
+  return tutorialIds;
+}
+
 export default function App() {
   const gameRootRef = useRef<HTMLDivElement | null>(null);
   const bottomBarRef = useRef<HTMLDivElement | null>(null);
@@ -60,6 +153,8 @@ export default function App() {
   const audioRef = useRef<GameAudio | null>(null);
   const pendingProgressSaveRef = useRef<GameProgressSnapshot | null>(null);
   const progressSaveTimerRef = useRef<number | null>(null);
+  const pendingTutorialIdsRef = useRef<TutorialId[]>([]);
+  const pendingTutorialActionRef = useRef<(() => void) | null>(null);
   const [hasStarted, setHasStarted] = useState(false);
   const [selectedMode, setSelectedMode] = useState<GameMode>('arcade');
   const [soundEnabled, setSoundEnabled] = useState(getInitialSoundEnabled);
@@ -67,6 +162,8 @@ export default function App() {
   const [savedProgress, setSavedProgress] = useState<GameProgressSnapshot | null>(null);
   const [progressReady, setProgressReady] = useState(false);
   const [isMenuShopOpen, setIsMenuShopOpen] = useState(false);
+  const [seenTutorialIds, setSeenTutorialIds] = useState(getInitialSeenTutorialIds);
+  const [activeTutorial, setActiveTutorial] = useState<TutorialCard | null>(null);
 
   useEffect(() => {
     let isMounted = true;
@@ -229,11 +326,59 @@ export default function App() {
       ? gameRef.current?.getUpgradeCatalog() ?? []
       : [];
 
+  const runAfterTutorials = (
+    tutorialIds: TutorialId[],
+    action: () => void
+  ) => {
+    const unseenTutorialIds = tutorialIds.filter(
+      id => !seenTutorialIds.includes(id)
+    );
+
+    if (!unseenTutorialIds.length) {
+      action();
+      return;
+    }
+
+    pendingTutorialIdsRef.current = unseenTutorialIds.slice(1);
+    pendingTutorialActionRef.current = action;
+    setActiveTutorial(TUTORIALS[unseenTutorialIds[0]]);
+  };
+
+  const handleTutorialContinue = () => {
+    if (!activeTutorial) {
+      return;
+    }
+
+    const nextSeenTutorialIds = Array.from(
+      new Set([...seenTutorialIds, activeTutorial.id])
+    );
+    setSeenTutorialIds(nextSeenTutorialIds);
+    saveSeenTutorialIds(nextSeenTutorialIds);
+
+    const nextTutorialId = pendingTutorialIdsRef.current.shift();
+    if (nextTutorialId) {
+      setActiveTutorial(TUTORIALS[nextTutorialId]);
+      return;
+    }
+
+    const action = pendingTutorialActionRef.current;
+    pendingTutorialActionRef.current = null;
+    setActiveTutorial(null);
+    action?.();
+  };
+
   const handleStartMode = (mode: GameMode) => {
     void audioRef.current?.resume();
     setIsMenuShopOpen(false);
-    setSelectedMode(mode);
-    setHasStarted(true);
+    const startLevel = savedProgress?.resumeLevel ?? 1;
+
+    runAfterTutorials(
+      getTutorialsForLevelStart(startLevel, true),
+      () => {
+        setSelectedMode(mode);
+        setHasStarted(true);
+      }
+    );
   };
 
   const handleMenuUpgradePurchase = (upgradeId: UpgradeId) => {
@@ -259,6 +404,26 @@ export default function App() {
     setIsMenuShopOpen(false);
     setUiState(createInitialUiState());
     setHasStarted(false);
+  };
+
+  const handlePrimaryOverlayAction = () => {
+    const game = gameRef.current;
+    if (!game) {
+      return;
+    }
+
+    if (uiState.overlayPrimaryAction === 'next') {
+      const nextLevel = game.getCurrentLevel() + 1;
+      const unlockTutorial = getUnlockTutorialForLevel(nextLevel);
+
+      runAfterTutorials(
+        unlockTutorial ? [unlockTutorial] : [],
+        () => game.startLevel(nextLevel)
+      );
+      return;
+    }
+
+    game.handlePrimaryOverlayAction();
   };
 
   return (
@@ -417,7 +582,7 @@ export default function App() {
               className="action-btn"
               type="button"
               style={{ display: uiState.overlayPrimaryVisible ? 'inline-flex' : 'none' }}
-              onClick={() => gameRef.current?.handlePrimaryOverlayAction()}
+              onClick={handlePrimaryOverlayAction}
             >
               {uiState.overlayPrimaryText}
             </button>
@@ -582,6 +747,23 @@ export default function App() {
           </div>
         ) : null}
       </div>
+
+      {activeTutorial ? (
+        <div id="tutorial-overlay" role="dialog" aria-modal="true">
+          <div className="tutorial-card">
+            <div className="tutorial-eyebrow">Подсказка</div>
+            <h2>{activeTutorial.title}</h2>
+            <p>{activeTutorial.message}</p>
+            <button
+              className="action-btn"
+              type="button"
+              onClick={handleTutorialContinue}
+            >
+              Понятно
+            </button>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

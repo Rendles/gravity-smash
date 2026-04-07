@@ -1,5 +1,11 @@
 import { Vector } from 'matter-js';
-import type { Arena, BlastWave, GamePieceBody, Particle } from './types';
+import type {
+  Arena,
+  BlastWave,
+  ComboPopup,
+  GamePieceBody,
+  Particle
+} from './types';
 
 interface CollisionPairLike {
   bodyA: GamePieceBody;
@@ -42,6 +48,16 @@ function drawBodyPath(ctx: CanvasRenderingContext2D, body: GamePieceBody) {
   }
 
   ctx.closePath();
+}
+
+function isBodyPastDangerLine(body: GamePieceBody, arena?: Arena) {
+  return (
+    !!arena &&
+    !body.pendingDestroy &&
+    body.bounds.min.y <= arena.dangerLineY &&
+    body.overflowSince !== null &&
+    body.overflowSince !== undefined
+  );
 }
 
 function drawInnerSelectionOutline(
@@ -181,10 +197,15 @@ export function drawArena(
   options?: {
     isFrozen?: boolean;
     fireHeatProgress?: number;
+    isDangerActive?: boolean;
   }
 ) {
   const isFrozen = options?.isFrozen ?? false;
   const fireHeatProgress = options?.fireHeatProgress ?? 0;
+  const isDangerActive = options?.isDangerActive ?? false;
+  const dangerPulse = isDangerActive
+    ? 0.5 + Math.sin(performance.now() / 92) * 0.5
+    : 0;
 
   ctx.save();
   ctx.globalCompositeOperation = 'destination-over';
@@ -266,10 +287,14 @@ export function drawArena(
     }
   }
 
-  ctx.shadowColor = isFrozen ? 'rgba(168, 235, 255, 0.34)' : 'rgba(255, 59, 91, 0.42)';
-  ctx.shadowBlur = isFrozen ? 22 : 18;
-  ctx.strokeStyle = isFrozen ? 'rgba(176, 236, 255, 0.72)' : 'rgba(255, 59, 91, 0.84)';
-  ctx.lineWidth = 4;
+  ctx.shadowColor = isFrozen
+    ? 'rgba(168, 235, 255, 0.34)'
+    : `rgba(255, 59, 91, ${isDangerActive ? 0.55 + dangerPulse * 0.35 : 0.42})`;
+  ctx.shadowBlur = isFrozen ? 22 : isDangerActive ? 18 + dangerPulse * 14 : 18;
+  ctx.strokeStyle = isFrozen
+    ? 'rgba(176, 236, 255, 0.72)'
+    : `rgba(255, 59, 91, ${isDangerActive ? 0.72 + dangerPulse * 0.28 : 0.84})`;
+  ctx.lineWidth = isDangerActive ? 4 + dangerPulse * 1.8 : 4;
   ctx.beginPath();
   ctx.moveTo(arena.x + 10, arena.dangerLineY);
   ctx.lineTo(arena.x + arena.width - 10, arena.dangerLineY);
@@ -278,9 +303,14 @@ export function drawArena(
   ctx.restore();
 }
 
-export function drawGlowBody(ctx: CanvasRenderingContext2D, body: GamePieceBody) {
+export function drawGlowBody(
+  ctx: CanvasRenderingContext2D,
+  body: GamePieceBody,
+  arena?: Arena
+) {
   ctx.save();
   applyBodyDeformTransform(ctx, body);
+  const isDangerBody = isBodyPastDangerLine(body, arena);
 
   if (body.isColorDestroyer) {
     const vertices = body.vertices;
@@ -370,6 +400,30 @@ export function drawGlowBody(ctx: CanvasRenderingContext2D, body: GamePieceBody)
     ctx.stroke();
   }
 
+  if (isDangerBody) {
+    const dangerPulse = 0.5 + Math.sin(performance.now() / 86 + body.id) * 0.5;
+
+    ctx.save();
+    drawBodyPath(ctx, body);
+    ctx.globalCompositeOperation = 'source-atop';
+    ctx.globalAlpha = 0.12 + dangerPulse * 0.2;
+    ctx.fillStyle = '#ff3b5b';
+    ctx.shadowColor = 'rgba(255, 59, 91, 0.48)';
+    ctx.shadowBlur = 18 + dangerPulse * 12;
+    ctx.fill();
+    ctx.restore();
+
+    ctx.save();
+    drawBodyPath(ctx, body);
+    ctx.globalAlpha = 0.28 + dangerPulse * 0.34;
+    ctx.strokeStyle = '#ff3b5b';
+    ctx.lineWidth = body.isHuge ? 4 : 3;
+    ctx.shadowColor = 'rgba(255, 59, 91, 0.62)';
+    ctx.shadowBlur = 16 + dangerPulse * 10;
+    ctx.stroke();
+    ctx.restore();
+  }
+
   drawInnerSelectionOutline(ctx, body);
 
   ctx.restore();
@@ -405,6 +459,61 @@ export function drawBlastWaves(ctx: CanvasRenderingContext2D, blastWaves: BlastW
     ctx.beginPath();
     ctx.arc(wave.x, wave.y, wave.radius, 0, Math.PI * 2);
     ctx.stroke();
+  });
+
+  ctx.restore();
+}
+
+export function drawComboPopups(ctx: CanvasRenderingContext2D, popups: ComboPopup[]) {
+  if (!popups.length) {
+    return;
+  }
+
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  popups.forEach(popup => {
+    const progress = 1 - popup.life / popup.maxLife;
+    const alpha = Math.max(0, Math.min(1, popup.life / popup.maxLife));
+    const y = popup.y - 38 * progress;
+    const scale = 1 + Math.sin(Math.min(1, progress) * Math.PI) * 0.12;
+
+    ctx.save();
+    ctx.translate(popup.x, y);
+    ctx.scale(scale, scale);
+    ctx.globalAlpha = Math.min(1, alpha * 1.25);
+
+    const pillWidth = 126;
+    const pillHeight = 46;
+    const radius = 14;
+    const left = -pillWidth * 0.5;
+    const top = -pillHeight * 0.5;
+
+    ctx.shadowColor = 'rgba(255, 225, 130, 0.38)';
+    ctx.shadowBlur = 22;
+    ctx.fillStyle = 'rgba(10, 14, 24, 0.78)';
+    ctx.beginPath();
+    ctx.roundRect(left, top, pillWidth, pillHeight, radius);
+    ctx.fill();
+
+    ctx.strokeStyle = 'rgba(255, 225, 130, 0.78)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.shadowBlur = 16;
+    ctx.shadowColor = 'rgba(255, 225, 130, 0.42)';
+    ctx.fillStyle = '#ffe182';
+    ctx.font = '800 14px Inter, system-ui, sans-serif';
+    ctx.fillText(`Комбо x${popup.destroyedCount}`, 0, -7);
+
+    ctx.shadowBlur = 12;
+    ctx.shadowColor = 'rgba(111, 255, 176, 0.36)';
+    ctx.fillStyle = '#6fffb0';
+    ctx.font = '800 12px Inter, system-ui, sans-serif';
+    ctx.fillText(`+${popup.bonusPoints} Coin`, 0, 11);
+
+    ctx.restore();
   });
 
   ctx.restore();
